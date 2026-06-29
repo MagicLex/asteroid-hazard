@@ -8,3 +8,4 @@ deploy.log
 autoresearch/data_cache.parquet
 autoresearch/model/
 autoresearch/run.log
+app/envupdate.log

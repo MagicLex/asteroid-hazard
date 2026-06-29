@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-from matplotlib import pyplot as plt
+import plotly.graph_objects as go
 
 FEATURE_COLS = ["class", "a", "e", "i", "om", "w", "q", "ad", "per", "n", "ma", "rot_per"]
 MODEL_NAME = "asteroid_pha"
@@ -45,7 +45,9 @@ def fetch_asteroid(name: str) -> dict:
     d = r.json()
     if "object" not in d:
         raise ValueError(d.get("message", "not found"))
-    elems = {e["name"]: e.get("value") for e in d.get("orbit", {}).get("elements", [])}
+    elem_list = d.get("orbit", {}).get("elements", [])
+    elems = {e["name"]: e.get("value") for e in elem_list}
+    sigmas_raw = {e["name"]: e.get("sigma") for e in elem_list}
     phys = {p["name"]: p.get("value") for p in d.get("phys_par", [])}
     fullname = d["object"].get("fullname", name)
     klass = d["object"].get("orbit_class", {}).get("code", "UNK")
@@ -71,8 +73,10 @@ def fetch_asteroid(name: str) -> dict:
     moid = f(orbit.get("moid"))
     if moid is None:
         moid = f(elems.get("moid"))
+    # Real JPL 1-sigma orbit uncertainties per element (the basis for the fan).
+    sigmas = {k: (f(sigmas_raw.get(k)) or 0.0) for k in ["a", "e", "i", "om", "w"]}
     return {"fullname": fullname, "is_neo": d["object"].get("neo", False),
-            "row": row, "moid": moid}
+            "row": row, "moid": moid, "sigmas": sigmas}
 
 
 def orbit_xyz(a, e, i, om, w, n=720):
@@ -100,29 +104,80 @@ def closest_pair(p, q):
     return np.sqrt(d2[ia, ib]), p[:, ia], q[:, ib]
 
 
-def orbit_figure(row, moid):
+def _sphere(center, radius, color, n=18):
+    """A small shaded sphere trace (Sun / Earth) for the 3D scene."""
+    u, v = np.meshgrid(np.linspace(0, 2 * np.pi, n), np.linspace(0, np.pi, n))
+    x = center[0] + radius * np.cos(u) * np.sin(v)
+    y = center[1] + radius * np.sin(u) * np.sin(v)
+    z = center[2] + radius * np.cos(v)
+    return go.Surface(x=x, y=y, z=z, showscale=False, opacity=1.0,
+                      colorscale=[[0, color], [1, color]], hoverinfo="skip",
+                      lighting=dict(ambient=0.6, diffuse=0.8))
+
+
+def sample_fan(row, sigmas, factor, k=14, seed=0):
+    """K orbits sampled within JPL's 1-sigma element uncertainties, scaled by
+    `factor` (the exaggeration). Deterministic (seeded) so it is stable across
+    Streamlit reruns. Returns the orbit point-arrays and their close-approach
+    distances to Earth."""
+    earth = orbit_xyz(1.0, 0.0167, 0.0, 0.0, 102.9)
+    base = {c: row[c] for c in ["a", "e", "i", "om", "w"]}
+    rng = np.random.default_rng(seed)
+    orbits, dists = [], []
+    for _ in range(k):
+        p = {c: base[c] + rng.standard_normal() * sigmas.get(c, 0.0) * factor
+             for c in base}
+        p["e"] = min(max(p["e"], 0.0), 0.99)          # keep a valid ellipse
+        p["a"] = max(p["a"], 0.05)
+        o = orbit_xyz(p["a"], p["e"], p["i"], p["om"], p["w"], n=360)
+        orbits.append(o)
+        dists.append(closest_pair(o, earth)[0])
+    return orbits, np.array(dists)
+
+
+def orbit_figure(row, moid, sigmas, factor):
+    """Interactive 3D heliocentric view: Sun at the centre, Earth's orbit and the
+    asteroid's orbit as real ellipses, with the closest-approach gap drawn, plus
+    a faint fan of orbits sampled within the (exaggerated) JPL orbit uncertainty.
+    Drag to rotate; the inclination is visible without a second panel."""
     earth = orbit_xyz(1.0, 0.0167, 0.0, 0.0, 102.9)
     ast = orbit_xyz(row["a"], row["e"], row["i"], row["om"], row["w"])
     dmin, pa, pe = closest_pair(ast, earth)
+    fan, fan_dists = sample_fan(row, sigmas, factor)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9, 4.4), facecolor="#0b0e11")
-    for ax, (h, v), title in ((ax1, (0, 1), "Top-down (ecliptic plane)"),
-                              (ax2, (0, 2), "Edge-on (shows inclination)")):
-        ax.set_facecolor("#0b0e11")
-        ax.plot(earth[h], earth[v], color="#3b82f6", lw=1.6, label="Earth")
-        ax.plot(ast[h], ast[v], color="#d97706", lw=1.6, label="Asteroid")
-        ax.plot([pa[h], pe[h]], [pa[v], pe[v]], color="#ef4444", lw=1.0,
-                ls="--", marker="o", ms=3, label="closest approach")
-        ax.scatter([0], [0], color="#fbbf24", s=40, zorder=5)  # Sun
-        ax.set_title(title, color="#cbd5e1", fontsize=9)
-        ax.set_aspect("equal")
-        ax.tick_params(colors="#475569", labelsize=7)
-        for s in ax.spines.values():
-            s.set_color("#1f2937")
-    ax1.legend(loc="upper right", fontsize=7, facecolor="#1a1f2b",
-               edgecolor="#1f2937", labelcolor="#cbd5e1")
-    fig.tight_layout()
-    return fig, dmin
+    fig = go.Figure()
+    for j, o in enumerate(fan):                        # uncertainty fan, behind
+        fig.add_trace(go.Scatter3d(
+            x=o[0], y=o[1], z=o[2], mode="lines", hoverinfo="skip",
+            line=dict(color="#f59e0b", width=1.5), opacity=0.22,
+            name="uncertainty fan", legendgroup="fan",
+            showlegend=(j == 0)))
+    fig.add_trace(go.Scatter3d(
+        x=earth[0], y=earth[1], z=earth[2], mode="lines", name="Earth orbit",
+        line=dict(color="#3b82f6", width=5), hoverinfo="name"))
+    fig.add_trace(go.Scatter3d(
+        x=ast[0], y=ast[1], z=ast[2], mode="lines", name="Asteroid orbit (nominal)",
+        line=dict(color="#f59e0b", width=5), hoverinfo="name"))
+    fig.add_trace(go.Scatter3d(
+        x=[pa[0], pe[0]], y=[pa[1], pe[1]], z=[pa[2], pe[2]],
+        mode="lines+markers", name=f"closest approach ({dmin:.3f} AU)",
+        line=dict(color="#ef4444", width=4, dash="dash"),
+        marker=dict(size=3, color="#ef4444"), hoverinfo="name"))
+    # Sun at the focus, Earth marker at the closest point on its orbit
+    fig.add_trace(_sphere([0, 0, 0], 0.06, "#fbbf24"))
+    fig.add_trace(_sphere(pe, 0.03, "#3b82f6"))
+
+    ax = dict(showbackground=False, showgrid=True, gridcolor="#1f2937",
+              zeroline=False, showticklabels=False, title="")
+    fig.update_layout(
+        height=560, margin=dict(l=0, r=0, t=10, b=0),
+        paper_bgcolor="#0b0e11", showlegend=True,
+        legend=dict(font=dict(color="#cbd5e1", size=12), x=0, y=0.98,
+                    bgcolor="rgba(26,31,43,0.6)"),
+        scene=dict(xaxis=ax, yaxis=ax, zaxis=ax, aspectmode="data",
+                   bgcolor="#0b0e11",
+                   camera=dict(eye=dict(x=1.3, y=1.3, z=0.9))))
+    return fig, dmin, fan_dists
 
 
 @st.cache_data(ttl=86400)
@@ -197,10 +252,30 @@ if (run or st.session_state.pop("go", False)) and name.strip():
     with st.expander("All features"):
         st.json(r)
 
-    st.subheader("The orbit, drawn")
+    st.subheader("The orbit, in 3D")
+    st.caption("Drag to rotate, scroll to zoom. Sun at the centre, Earth's orbit "
+               "in blue, the asteroid's nominal orbit in bright orange. The faint "
+               "orange fan is where the orbit could lie within its uncertainty; "
+               "the red dashed line is the closest the nominal orbits come.")
     if r["a"] and r["e"] is not None and r["i"] is not None:
-        fig, dmin = orbit_figure(r, info["moid"])
-        st.pyplot(fig, use_container_width=True)
+        # Auto-pick an exaggeration so the fan is visible: real 1-sigma is tiny
+        # (these orbits are very well determined), so scale it up and SAY so.
+        sig_a = info["sigmas"].get("a", 0.0)
+        default_exp = 6
+        if sig_a > 0:
+            default_exp = int(min(9, max(3, round(np.log10(0.01 / sig_a)))))
+        exp = st.slider(
+            "Exaggerate orbit uncertainty (×10ⁿ)", 3, 9, default_exp,
+            key=f"exagg_{info['fullname']}",
+            help="The real JPL 1σ orbit uncertainty is microscopic for catalogued "
+                 "objects, so the fan is exaggerated to be visible. This is a "
+                 "geometric what-if, NOT a JPL impact probability.")
+        factor = 10.0 ** exp
+
+        fig, dmin, fan_dists = orbit_figure(r, info["moid"], info["sigmas"], factor)
+        st.plotly_chart(fig, use_container_width=True,
+                        config={"displayModeBar": False})
+
         cc = st.columns(2)
         cc[0].metric("Real MOID (JPL)", f"{info['moid']:.4f} AU"
                      if info["moid"] is not None else "n/a",
@@ -211,10 +286,32 @@ if (run or st.session_state.pop("go", False)) and name.strip():
                      help="Computed here from the drawn ellipses. Approximates "
                           "MOID; small differences are sampling and Earth's "
                           "real orbit vs the circle drawn.")
+
+        # Collision forecast: how the close-approach distance spreads across the
+        # exaggerated uncertainty fan. Honest framing — not an impact probability.
+        st.markdown("**Collision forecast** — nominal vs the uncertainty fan")
+        LD = 0.00257  # 1 lunar distance in AU
+        lo, hi = float(fan_dists.min()), float(fan_dists.max())
+        fc = st.columns(2)
+        fc[0].metric("Nominal closest approach", f"{dmin / LD:.1f} lunar dist",
+                     help=f"{dmin:.4f} AU. 1 lunar distance = {LD} AU.")
+        fc[1].metric(f"Fan at ×10^{exp}", f"{lo / LD:.1f} – {hi / LD:.1f} LD",
+                     help=f"{lo:.4f} – {hi:.4f} AU across orbits sampled within "
+                          f"the (exaggerated) 1σ uncertainty.")
+        st.caption(
+            f"Even with the real orbit uncertainty blown up **×10^{exp}**, the "
+            f"closest the fan brings this object is **{lo / LD:.1f} lunar "
+            f"distances** ({lo:.4f} AU) — Earth is {0.0000426 / LD:.4f} LD wide for "
+            "scale. The fan is a geometric sensitivity sketch from JPL's per-element "
+            "1σ, not a real impact probability (that needs the full covariance and "
+            "time integration). The tighter the fan collapses as you lower the "
+            "exaggeration, the better-pinned the orbit.")
+
         if info["moid"] is not None:
             hazard_geom = info["moid"] <= 0.05
             st.caption(
-                f"Orbits come within **{info['moid']:.3f} AU**. PHA needs ≤ 0.05 AU "
+                f"Nominal orbits come within **{info['moid']:.3f} AU**. PHA needs "
+                "≤ 0.05 AU "
                 + ("and a big enough body. This one **clears the distance bar** — "
                    "whether it's a PHA then turns on size, which the model can't see."
                    if hazard_geom else
