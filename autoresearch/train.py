@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 # ============================ EXPERIMENT (edit me) ============================
-EXP_DESC = "baseline HistGradientBoosting (champion config)"
+EXP_DESC = "XGBoost (n600, depth4, lr0.03, scale_pos_weight for 6% imbalance)"
 
 
 def engineer_features(X: pd.DataFrame) -> pd.DataFrame:
@@ -34,15 +34,16 @@ def build_model():
     """Unfitted sklearn estimator with predict_proba. Any fit-stateful step
     (scaling, encoding, selection) lives here so it fits per CV fold."""
     from sklearn.compose import ColumnTransformer
-    from sklearn.ensemble import HistGradientBoostingClassifier
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import OneHotEncoder
+    from xgboost import XGBClassifier
     pre = ColumnTransformer(
         [("cat", OneHotEncoder(handle_unknown="ignore"), ["class"])],
         remainder="passthrough")
-    clf = HistGradientBoostingClassifier(
-        max_iter=400, learning_rate=0.05, max_depth=4,
-        l2_regularization=1.0, class_weight="balanced", random_state=42)
+    clf = XGBClassifier(n_estimators=600, max_depth=4, learning_rate=0.03,
+                        subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+                        scale_pos_weight=15.0, eval_metric="logloss",
+                        random_state=42, n_jobs=-1)
     return Pipeline([("pre", pre), ("clf", clf)])
 # ========================== end experiment section ===========================
 
