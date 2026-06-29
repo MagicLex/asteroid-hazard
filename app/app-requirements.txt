@@ -7,3 +7,4 @@ joblib==1.5.3
 # Added for the app on top of python-app-pipeline:
 requests
 plotly
+xgboost==3.2.0
