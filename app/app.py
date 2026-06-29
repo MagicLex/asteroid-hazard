@@ -7,6 +7,7 @@ scenario. The headline: for objects with no measured albedo (97% of them), we do
 materially better than the blind constant-albedo guess everyone falls back to.
 """
 import importlib.util
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +45,22 @@ def load_model():
     mr = hopsworks.login().get_model_registry()
     m = max(mr.get_models(MODEL_NAME), key=lambda x: x.version)  # latest, not v1
     return joblib.load(Path(m.download()) / "model.joblib"), m.version
+
+
+@st.cache_data(ttl=86400)
+def gaia_numbers():
+    """Numbered asteroids that have a Gaia spectrum, for the random pick."""
+    try:
+        r = requests.get(TAP, params={"REQUEST": "doQuery", "LANG": "ADQL",
+                         "FORMAT": "json", "MAXREC": "100000",
+                         "QUERY": 'SELECT "MPC" FROM "I/359/ssor" '
+                         'WHERE "lambda"=374 AND "MPC" IS NOT NULL'}, timeout=60)
+        nums = [int(row[0]) for row in r.json()["data"] if row[0]]
+        if nums:
+            return nums
+    except Exception:
+        pass
+    return list(range(1, 1001))  # fallback: low numbers mostly have spectra
 
 
 @st.cache_data(ttl=3600)
@@ -157,11 +174,25 @@ if "ast" not in st.session_state:
 c1, c2 = st.columns([3, 1])
 c1.text_input("Asteroid number or name", key="ast",
               placeholder="4, 21, Vesta, Eros, Ceres, ...")
-go = c2.button("Assess", type="primary", use_container_width=True)
-st.caption("Works for the 34,577 numbered asteroids with a Gaia DR3 spectrum. "
-           "Try `4` (Vesta), `21` (Lutetia), `1` (Ceres), `433` (Eros).")
+assess = c2.button("Assess", type="primary", use_container_width=True)
 
-if go or st.session_state.get("assessed"):
+
+def _pick(v):
+    st.session_state.ast = str(v)
+    st.session_state.assessed = True
+
+
+POPULAR = [("1", "Ceres"), ("4", "Vesta"), ("2", "Pallas"), ("16", "Psyche"),
+           ("433", "Eros"), ("21", "Lutetia"), ("243", "Ida"), ("951", "Gaspra")]
+pcols = st.columns(len(POPULAR) + 1)
+for col, (num, nm) in zip(pcols, POPULAR):
+    col.button(nm, on_click=_pick, args=(num,), use_container_width=True)
+pcols[-1].button("🎲 Random", use_container_width=True,
+                 on_click=lambda: _pick(random.choice(gaia_numbers())))
+st.caption("Popular targets, a random draw, or type any of the 34,577 numbered "
+           "asteroids with a Gaia DR3 spectrum.")
+
+if assess or st.session_state.get("assessed"):
     st.session_state.assessed = True
     with st.spinner("Connecting to Hopsworks and loading the model…"):
         model, mver = load_model()
