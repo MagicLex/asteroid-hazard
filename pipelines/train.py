@@ -25,16 +25,18 @@ OUT = Path("artifact").resolve()
 
 # Excluded from the model: ids, the raw flags, the PHA definition (moid, H) and
 # size proxies (diameter, albedo), and tp (an epoch, not predictive).
+# NOTE: Hopsworks lowercases feature names, so these MUST be lowercase or the
+# exclusion silently misses (e.g. "H" -> stored as "h" -> leaks the size half).
 NON_FEATURES = {
     "spkid", "full_name", "neo", "pha", "pha_label",
-    "moid", "H", "diameter", "albedo", "tp",
+    "moid", "h", "diameter", "albedo", "tp",
 }
 CATEGORICAL = ["class"]
 
 
 def get_feature_view(fs):
     fg = fs.get_feature_group(FG_NAME, version=1)
-    feature_cols = [f.name for f in fg.features if f.name not in NON_FEATURES]
+    feature_cols = [f.name for f in fg.features if f.name.lower() not in NON_FEATURES]
     query = fg.select(feature_cols + [LABEL])
     fv = fs.get_or_create_feature_view(
         name=FV_NAME, version=1,
