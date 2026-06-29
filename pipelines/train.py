@@ -46,10 +46,11 @@ def get_feature_view(fs):
 
 
 def build_model():
-    from sklearn.ensemble import HistGradientBoostingRegressor
-    return HistGradientBoostingRegressor(
-        max_iter=500, learning_rate=0.05, max_depth=5,
-        l2_regularization=1.0, random_state=42)
+    # XGBoost won the autoresearch run (CV R² 0.597 vs 0.593 for HGB); see autoresearch/.
+    from xgboost import XGBRegressor
+    return XGBRegressor(n_estimators=700, max_depth=5, learning_rate=0.03,
+                        subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+                        random_state=42, n_jobs=-1)
 
 
 def diam_error_factor(log_pred, log_true):
