@@ -29,6 +29,32 @@ base patterns.
 
 ![The orbit in 3D: Earth's orbit in blue, the asteroid's nominal orbit in orange, the translucent uncertainty cone, and the red dashed closest approach.](assets/orbit-3d.png)
 
+## Pipeline
+
+```mermaid
+flowchart LR
+    jpl([JPL SBDB · 42k NEOs]):::ext
+    subgraph FE[Feature]
+        direction TB
+        collect[collect.py] --> fp[feature_pipeline.py] --> fg[(neo_features)]:::hops
+    end
+    subgraph TR[Training]
+        direction TB
+        fv[neo_pha_fv · geometry only] --> train[train.py / autoresearch] --> reg[(asteroid_pha)]:::hops
+    end
+    subgraph INF[Inference]
+        direction TB
+        app[Streamlit app · 3D orbit + score]:::hops
+    end
+    jpl --> collect
+    fg --> fv
+    reg --> app
+    user([asteroid name]):::ext --> app
+    app -. live orbit .-> jpl
+    classDef hops fill:#10b98122,stroke:#34d399,color:#e5e7eb;
+    classDef ext fill:none,stroke:#6b7280,color:#9ca3af,stroke-dasharray:4 3;
+```
+
 ## Result
 
 From orbit geometry alone (no MOID, H, or size), 5-fold CV:
@@ -48,6 +74,32 @@ feature names, so the stored column is `h`, but the exclusion list said `"H"`.
 Absolute magnitude H (the size half of the PHA definition) leaked straight in.
 Fixing the exclusion to lowercase dropped it to an honest 0.86. Same lesson as
 every project here: if the model looks great, check what it is allowed to see.
+
+## Model evaluation
+
+| | |
+|---|---|
+| ![ROC curve](assets/roc_curve.png) | ![Precision-recall](assets/pr_curve.png) |
+| ![Confusion matrix](assets/confusion_matrix.png) | ![Feature importance](assets/feature_importance.png) |
+
+Perihelion distance `q` and rotation period `rot_per` carry most of the signal.
+`q` is how close the orbit's nearest point sits to 1 AU, the "comes close to
+Earth" half of the definition. `rot_per` is a soft observability/size proxy (only
+larger, well-observed bodies have a measured spin), which is as near as the model
+gets to the size half it is forbidden to see.
+
+## What the model actually predicts
+
+The 3D orbit, the MOID, the closest approach, the variation forecast: all of that
+is deterministic celestial mechanics computed from the orbital elements, not
+prediction. The one predicted number is the **doomsday score**, where
+`asteroid_pha` maps the orbital elements to a probability of being PHA.
+
+Because PHA is *defined* by MOID and size, and the model is barred from both, what
+it really does is re-derive the "close approach" half from geometry (the same
+quantity the orbit view computes exactly) and lean on `rot_per` as a weak size
+proxy. It cannot see the size half, so it cannot fully determine the label. That
+is the 0.86 ceiling, and why the task is honest rather than a tautology.
 
 ## Status
 
