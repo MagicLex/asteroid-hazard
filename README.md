@@ -27,6 +27,8 @@ inference) system, forked from the
 [readme-vaporware-score](https://github.com/MagicLex/readme-vaporware-score)
 base patterns.
 
+![The orbit in 3D: Earth's orbit in blue, the asteroid's nominal orbit in orange, the translucent uncertainty cone, and the red dashed closest approach.](assets/orbit-3d.png)
+
 ## Result
 
 From orbit geometry alone (no MOID, H, or size), 5-fold CV:
