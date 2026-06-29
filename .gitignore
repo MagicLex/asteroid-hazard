@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+models/artifact/
+models/*_dl/
+.env
