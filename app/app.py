@@ -4,6 +4,7 @@ Type a near-Earth asteroid name (Apophis, Bennu, Eros, ...). The app pulls its
 live orbit from the JPL Small-Body Database and scores how "potentially
 hazardous" the model thinks it is, from orbit geometry alone (no MOID, no size).
 """
+import random
 from pathlib import Path
 
 import joblib
@@ -16,6 +17,7 @@ from matplotlib import pyplot as plt
 FEATURE_COLS = ["class", "a", "e", "i", "om", "w", "q", "ad", "per", "n", "ma", "rot_per"]
 MODEL_NAME = "asteroid_pha"
 SBDB = "https://ssd-api.jpl.nasa.gov/sbdb.api"
+SBDB_QUERY = "https://ssd-api.jpl.nasa.gov/sbdb_query.api"
 HERE = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Asteroid Doomsday-o-meter", page_icon="🪨", layout="centered")
@@ -123,6 +125,24 @@ def orbit_figure(row, moid):
     return fig, dmin
 
 
+@st.cache_data(ttl=86400)
+def neo_designations():
+    """All NEO designations from the JPL catalogue (the same source the model
+    was built on), so the random picker draws a real object, not a fixed list."""
+    r = requests.get(SBDB_QUERY, params={"fields": "pdes,name", "sb-group": "neo",
+                                         "full-prec": "false"}, timeout=120)
+    r.raise_for_status()
+    d = r.json()
+    pi, ni = d["fields"].index("pdes"), d["fields"].index("name")
+    # prefer the friendly name (Apophis), fall back to the designation (2004 MN4)
+    return [row[ni] or row[pi] for row in d["data"] if row[ni] or row[pi]]
+
+
+def pick_random():
+    st.session_state.asteroid = random.choice(neo_designations())
+    st.session_state.go = True
+
+
 model = load_model()
 
 st.title("🪨 Asteroid Doomsday-o-meter")
@@ -131,10 +151,19 @@ st.caption("Type a near-Earth asteroid. We pull its orbit from JPL and score how
            "model never sees the actual close-approach distance or the size, "
            "which is what *defines* hazardous. So this is a guess from shape.")
 
-name = st.text_input("Asteroid name or designation", value="Apophis",
+if "asteroid" not in st.session_state:
+    st.session_state.asteroid = "Apophis"
+name = st.text_input("Asteroid name or designation", key="asteroid",
                      placeholder="Apophis, Bennu, Eros, 2024 YR4, ...")
+st.caption("Try a named one — Apophis, Bennu, Eros, Ryugu, Didymos, Toutatis, "
+           "Phaethon — or any provisional designation like `2024 YR4`. Names come "
+           "from the [JPL Small-Body Database](https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html). "
+           "Hit 🎲 for a real random NEO drawn from the catalogue.")
+c1, c2 = st.columns([1, 1])
+run = c1.button("Score it", type="primary", use_container_width=True)
+c2.button("🎲 Random NEO", on_click=pick_random, use_container_width=True)
 
-if st.button("Score it", type="primary") and name.strip():
+if (run or st.session_state.pop("go", False)) and name.strip():
     try:
         info = fetch_asteroid(name)
     except Exception as e:
