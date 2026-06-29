@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 # ============================ EXPERIMENT (edit me) ============================
-EXP_DESC = "XGBoost + orbital-mechanics geometry (node-distance MOID proxy, Tisserand, Earth-crossing)"
+EXP_DESC = "richer geometry + deeper XGBoost (depth5, n900, lr0.025, min_child_weight2, gamma0.5)"
 
 # Earth's orbit bounds (AU): perihelion 0.983, aphelion 1.017.
 _E_PERI, _E_APH = 0.983, 1.017
@@ -56,10 +56,10 @@ def build_model():
     pre = ColumnTransformer(
         [("cat", OneHotEncoder(handle_unknown="ignore"), ["class"])],
         remainder="passthrough")
-    clf = XGBClassifier(n_estimators=600, max_depth=4, learning_rate=0.03,
+    clf = XGBClassifier(n_estimators=900, max_depth=5, learning_rate=0.025,
                         subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
-                        scale_pos_weight=15.0, eval_metric="logloss",
-                        random_state=42, n_jobs=-1)
+                        min_child_weight=2, gamma=0.5, scale_pos_weight=15.0,
+                        eval_metric="logloss", random_state=42, n_jobs=-1)
     return Pipeline([("pre", pre), ("clf", clf)])
 # ========================== end experiment section ===========================
 
