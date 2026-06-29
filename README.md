@@ -53,10 +53,13 @@ every project here: if the model looks great, check what it is allowed to see.
 - [x] Feature pipeline -> offline feature group `neo_features` (Hopsworks job)
 - [x] Orbit-geometry-only feature view + PHA classifier, ROC-AUC 0.86 (Hopsworks job)
 - [x] Scorer app (`app/app.py`): type an asteroid -> live JPL orbit -> doomsday score
-- [ ] **Orbit-trajectory visual (next, gates deploy):** plot the asteroid's
-      orbital ellipse vs Earth's orbit from a/e/i/Ω/ω so you *see* the close
-      approach. Show the real MOID in the viz (honest) alongside the model's
-      geometry-only prediction. Deploy the app once it is visual.
+- [x] **Orbit-trajectory visual:** the asteroid's orbital ellipse vs Earth's,
+      from a/e/i/Ω/ω, drawn top-down and edge-on so you *see* the close approach.
+      The real JPL MOID is shown alongside the model's geometry-only prediction
+      (honest: MOID is never a model feature). Orbit math validated against JPL
+      MOID for Eros/Ceres (0.150 vs 0.149, 1.585 vs 1.58).
+- [x] **Deployed** as a Hopsworks Streamlit app (`app/deploy_app.py`), env
+      `asteroid-app-env` (python-app-pipeline + the model's pinned sklearn stack).
 
 ## Reproduce
 

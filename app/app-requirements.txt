@@ -1,0 +1,9 @@
+# Pin the exact stack that pickled the model, or joblib.load fails in the app pod.
+# (training job ran on sklearn 1.8.0 — confirmed by loading the artifact.)
+scikit-learn==1.8.0
+numpy==2.4.6
+scipy==1.17.1
+joblib==1.5.3
+# Added for the app on top of python-app-pipeline:
+matplotlib
+requests

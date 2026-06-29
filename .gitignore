@@ -4,3 +4,4 @@ models/artifact/
 models/*_dl/
 .env
 artifact_dl/
+deploy.log
