@@ -12,6 +12,20 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+
+# plotly is pinned in app-requirements.txt, but a cloned-env image rebuild can lag
+# behind an app restart, so a fresh pod may boot before plotly is baked in.
+# Self-heal: install it at startup only if missing (no-op once the image catches
+# up). Apps installing a dep at startup is the sanctioned pattern here.
+import importlib.util
+import subprocess
+import sys
+if importlib.util.find_spec("plotly") is None:
+    for _cmd in (["-m", "uv", "pip", "install", "--system", "plotly"],
+                 ["-m", "pip", "install", "--user", "plotly"]):
+        if subprocess.run([sys.executable, *_cmd]).returncode == 0:
+            break
+    importlib.invalidate_caches()
 import plotly.graph_objects as go
 
 FEATURE_COLS = ["class", "a", "e", "i", "om", "w", "q", "ad", "per", "n", "ma", "rot_per"]
