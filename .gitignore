@@ -5,3 +5,6 @@ models/*_dl/
 .env
 artifact_dl/
 deploy.log
+autoresearch/data_cache.parquet
+autoresearch/model/
+autoresearch/run.log
