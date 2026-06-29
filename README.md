@@ -1,5 +1,12 @@
 # Asteroid Doomsday-o-meter
 
+![Asteroid Doomsday-o-meter](assets/banner.svg)
+
+[![awesome-ml-systems](https://img.shields.io/badge/awesome--ml--systems-%23002-34d399?labelColor=0b0e11&style=flat)](https://github.com/MagicLex/awesome-ml-systems)
+[![Hopsworks](https://img.shields.io/badge/built_on-Hopsworks-1CB182?labelColor=0b0e11&style=flat)](https://www.hopsworks.ai/)
+
+One small ML system per day on Hopsworks.
+
 Can you tell whether a near-Earth asteroid is classified "potentially hazardous"
 from the shape of its orbit alone?
 
