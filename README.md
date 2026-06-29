@@ -20,12 +20,32 @@ inference) system, forked from the
 [readme-vaporware-score](https://github.com/MagicLex/readme-vaporware-score)
 base patterns.
 
+## Result
+
+From orbit geometry alone (no MOID, H, or size), 5-fold CV:
+
+| metric | value |
+|---|---:|
+| ROC-AUC | 0.86 |
+| average precision | 0.34 (6% baseline = 0.06) |
+
+The orbit shape predicts the "comes close to Earth" half of the PHA definition
+well; it cannot see the size half, which caps it below 1.0. Honest.
+
+### The leakage we caught
+
+First run scored ROC-AUC 0.985, which was too good. Cause: Hopsworks lowercases
+feature names, so the stored column is `h`, but the exclusion list said `"H"`.
+Absolute magnitude H (the size half of the PHA definition) leaked straight in.
+Fixing the exclusion to lowercase dropped it to an honest 0.86. Same lesson as
+every project here: if the model looks great, check what it is allowed to see.
+
 ## Status
 
 - [x] Collector (`collect/collect.py`): JPL SBDB -> `data/neos.jsonl`
-- [ ] Feature pipeline -> offline feature group (Hopsworks job)
-- [ ] Orbit-geometry-only feature view + PHA classifier (handles 6% imbalance)
-- [ ] Register with eval plots; serve / app
+- [x] Feature pipeline -> offline feature group `neo_features` (Hopsworks job)
+- [x] Orbit-geometry-only feature view + PHA classifier, ROC-AUC 0.86 (Hopsworks job)
+- [ ] Serve / app (optional)
 
 ## Reproduce
 
