@@ -129,55 +129,85 @@ def _sphere(center, radius, color, n=18):
                       lighting=dict(ambient=0.6, diffuse=0.8))
 
 
-def sample_fan(row, sigmas, factor, k=14, seed=0):
-    """K orbits sampled within JPL's 1-sigma element uncertainties, scaled by
-    `factor` (the exaggeration). Deterministic (seeded) so it is stable across
-    Streamlit reruns. Returns the orbit point-arrays and their close-approach
-    distances to Earth."""
-    earth = orbit_xyz(1.0, 0.0167, 0.0, 0.0, 102.9)
-    base = {c: row[c] for c in ["a", "e", "i", "om", "w"]}
-    rng = np.random.default_rng(seed)
-    orbits, dists = [], []
+def _tube(nominal, samples, stride=2, ring=16):
+    """A translucent tube enveloping the sampled orbits: at each step along the
+    nominal orbit, a ring whose radius is how far the samples wander there. The
+    radius grows where the orbit is least certain, so it reads as a cone/horn —
+    one surface, far lighter than dozens of separate orbit lines."""
+    P = nominal[:, ::stride]                               # 3 x M
+    S = np.stack([s[:, ::stride] for s in samples])        # K x 3 x M
+    rad = np.linalg.norm(S - P[None], axis=1).max(axis=0)  # M, enveloping radius
+    T = np.gradient(P, axis=1)
+    T /= (np.linalg.norm(T, axis=0) + 1e-12)               # unit tangents
+    M = P.shape[1]
+    ref = np.tile(np.array([0.0, 0.0, 1.0])[:, None], (1, M))
+    bad = np.abs((T * ref).sum(0)) > 0.95                  # tangent near-vertical
+    ref[:, bad] = np.array([1.0, 0.0, 0.0])[:, None]
+    n1 = np.cross(T.T, ref.T).T; n1 /= (np.linalg.norm(n1, axis=0) + 1e-12)
+    n2 = np.cross(T.T, n1.T).T;  n2 /= (np.linalg.norm(n2, axis=0) + 1e-12)
+    th = np.linspace(0, 2 * np.pi, ring)
+    cx, sx, rr = np.cos(th)[None, :], np.sin(th)[None, :], rad[:, None]
+    xx = P[0][:, None] + rr * (cx * n1[0][:, None] + sx * n2[0][:, None])
+    yy = P[1][:, None] + rr * (cx * n1[1][:, None] + sx * n2[1][:, None])
+    zz = P[2][:, None] + rr * (cx * n1[2][:, None] + sx * n2[2][:, None])
+    return xx, yy, zz
+
+
+@st.cache_data(show_spinner=False)
+def _orbit_geometry(elem, sig, exp, k=12, nh=720, nl=240):
+    """Cached geometry for the 3D view, keyed on (elements, sigmas, exp). Moving
+    the slider recomputes only on a real change, and revisited values are instant.
+    The nominal closest approach is computed at high resolution (nh); the cone and
+    its spread use a coarser grid (nl) — the headline number stays accurate, the
+    what-if cone stays cheap."""
+    a, e, i, om, w = elem
+    factor = 10.0 ** exp
+    earth_hi = orbit_xyz(1.0, 0.0167, 0.0, 0.0, 102.9, nh)
+    nominal = orbit_xyz(a, e, i, om, w, nh)
+    dmin, pa, pe = closest_pair(nominal, earth_hi)
+    earth_lo = orbit_xyz(1.0, 0.0167, 0.0, 0.0, 102.9, nl)
+    nominal_lo = orbit_xyz(a, e, i, om, w, nl)
+    rng = np.random.default_rng(0)                         # seeded → stable
+    sa, se, si, som, sw = sig
+    samples, dists = [], []
     for _ in range(k):
-        p = {c: base[c] + rng.standard_normal() * sigmas.get(c, 0.0) * factor
-             for c in base}
-        p["e"] = min(max(p["e"], 0.0), 0.99)          # keep a valid ellipse
-        p["a"] = max(p["a"], 0.05)
-        o = orbit_xyz(p["a"], p["e"], p["i"], p["om"], p["w"], n=360)
-        orbits.append(o)
-        dists.append(closest_pair(o, earth)[0])
-    return orbits, np.array(dists)
+        o = orbit_xyz(max(a + rng.standard_normal() * sa * factor, 0.05),
+                      min(max(e + rng.standard_normal() * se * factor, 0.0), 0.99),
+                      i + rng.standard_normal() * si * factor,
+                      om + rng.standard_normal() * som * factor,
+                      w + rng.standard_normal() * sw * factor, nl)
+        samples.append(o)
+        dists.append(closest_pair(o, earth_lo)[0])
+    xx, yy, zz = _tube(nominal_lo, samples)
+    return (earth_hi, nominal, xx, yy, zz, pa, pe, float(dmin),
+            float(min(dists)), float(max(dists)))
 
 
-def orbit_figure(row, moid, sigmas, factor):
-    """Interactive 3D heliocentric view: Sun at the centre, Earth's orbit and the
-    asteroid's orbit as real ellipses, with the closest-approach gap drawn, plus
-    a faint fan of orbits sampled within the (exaggerated) JPL orbit uncertainty.
-    Drag to rotate; the inclination is visible without a second panel."""
-    earth = orbit_xyz(1.0, 0.0167, 0.0, 0.0, 102.9)
-    ast = orbit_xyz(row["a"], row["e"], row["i"], row["om"], row["w"])
-    dmin, pa, pe = closest_pair(ast, earth)
-    fan, fan_dists = sample_fan(row, sigmas, factor)
+def orbit_figure(row, sigmas, exp):
+    """3D heliocentric view from cached geometry: Sun, Earth's orbit, the nominal
+    asteroid orbit, a translucent uncertainty cone, and the closest approach.
+    Returns the figure plus the close-approach numbers for the readout."""
+    elem = (row["a"], row["e"], row["i"], row["om"], row["w"])
+    sig = tuple(sigmas.get(c, 0.0) for c in ["a", "e", "i", "om", "w"])
+    earth, nominal, xx, yy, zz, pa, pe, dmin, lo, hi = _orbit_geometry(elem, sig, exp)
 
     fig = go.Figure()
-    for j, o in enumerate(fan):                        # uncertainty fan, behind
-        fig.add_trace(go.Scatter3d(
-            x=o[0], y=o[1], z=o[2], mode="lines", hoverinfo="skip",
-            line=dict(color="#f59e0b", width=1.5), opacity=0.22,
-            name="uncertainty fan", legendgroup="fan",
-            showlegend=(j == 0)))
+    fig.add_trace(go.Surface(
+        x=xx, y=yy, z=zz, opacity=0.30, showscale=False, hoverinfo="skip",
+        colorscale=[[0, "#f59e0b"], [1, "#f59e0b"]], name="uncertainty cone",
+        showlegend=True, lighting=dict(ambient=0.75, diffuse=0.4)))
     fig.add_trace(go.Scatter3d(
         x=earth[0], y=earth[1], z=earth[2], mode="lines", name="Earth orbit",
         line=dict(color="#3b82f6", width=5), hoverinfo="name"))
     fig.add_trace(go.Scatter3d(
-        x=ast[0], y=ast[1], z=ast[2], mode="lines", name="Asteroid orbit (nominal)",
-        line=dict(color="#f59e0b", width=5), hoverinfo="name"))
+        x=nominal[0], y=nominal[1], z=nominal[2], mode="lines",
+        name="Asteroid orbit (nominal)", line=dict(color="#f59e0b", width=5),
+        hoverinfo="name"))
     fig.add_trace(go.Scatter3d(
         x=[pa[0], pe[0]], y=[pa[1], pe[1]], z=[pa[2], pe[2]],
         mode="lines+markers", name=f"closest approach ({dmin:.3f} AU)",
         line=dict(color="#ef4444", width=4, dash="dash"),
         marker=dict(size=3, color="#ef4444"), hoverinfo="name"))
-    # Sun at the focus, Earth marker at the closest point on its orbit
     fig.add_trace(_sphere([0, 0, 0], 0.06, "#fbbf24"))
     fig.add_trace(_sphere(pe, 0.03, "#3b82f6"))
 
@@ -185,13 +215,14 @@ def orbit_figure(row, moid, sigmas, factor):
               zeroline=False, showticklabels=False, title="")
     fig.update_layout(
         height=560, margin=dict(l=0, r=0, t=10, b=0),
-        paper_bgcolor="#0b0e11", showlegend=True,
+        paper_bgcolor="#0b0e11", showlegend=True, uirevision="keep",
         legend=dict(font=dict(color="#cbd5e1", size=12), x=0, y=0.98,
                     bgcolor="rgba(26,31,43,0.6)"),
         scene=dict(xaxis=ax, yaxis=ax, zaxis=ax, aspectmode="data",
                    bgcolor="#0b0e11",
-                   camera=dict(eye=dict(x=1.3, y=1.3, z=0.9))))
-    return fig, dmin, fan_dists
+                   camera=dict(eye=dict(x=1.3, y=1.3, z=0.9),
+                               center=dict(x=0, y=0, z=0))))  # pivot on the Sun
+    return fig, dmin, lo, hi
 
 
 @st.cache_data(ttl=86400)
@@ -232,12 +263,18 @@ c1, c2 = st.columns([1, 1])
 run = c1.button("Score it", type="primary", use_container_width=True)
 c2.button("🎲 Random NEO", on_click=pick_random, use_container_width=True)
 
+# Score only on a click / random pick, and stash the result. Everything below
+# renders from session_state so adjusting the slider does NOT re-fetch or
+# re-score — it just re-reads the (cached) orbit geometry.
 if (run or st.session_state.pop("go", False)) and name.strip():
     try:
-        info = fetch_asteroid(name)
+        st.session_state.scored = fetch_asteroid(name)
     except Exception as e:
         st.error(f"lookup failed: {e}")
-        st.stop()
+        st.session_state.pop("scored", None)
+
+if st.session_state.get("scored"):
+    info = st.session_state.scored
     if not info["is_neo"]:
         st.warning(f"{info['fullname']} is not a near-Earth object; the model is "
                    "trained on NEOs only. Scoring anyway.")
@@ -267,12 +304,13 @@ if (run or st.session_state.pop("go", False)) and name.strip():
         st.json(r)
 
     st.subheader("The orbit, in 3D")
-    st.caption("Drag to rotate, scroll to zoom. Sun at the centre, Earth's orbit "
-               "in blue, the asteroid's nominal orbit in bright orange. The faint "
-               "orange fan is where the orbit could lie within its uncertainty; "
-               "the red dashed line is the closest the nominal orbits come.")
+    st.caption("Drag to rotate (the view pivots on the Sun), scroll to zoom. "
+               "Earth's orbit in blue, the asteroid's nominal orbit in bright "
+               "orange. The translucent orange cone is where the orbit could lie "
+               "within its uncertainty; the red dashed line is the closest the "
+               "nominal orbits come.")
     if r["a"] and r["e"] is not None and r["i"] is not None:
-        # Auto-pick an exaggeration so the fan is visible: real 1-sigma is tiny
+        # Auto-pick an exaggeration so the cone is visible: real 1-sigma is tiny
         # (these orbits are very well determined), so scale it up and SAY so.
         sig_a = info["sigmas"].get("a", 0.0)
         default_exp = 6
@@ -282,11 +320,10 @@ if (run or st.session_state.pop("go", False)) and name.strip():
             "Exaggerate orbit uncertainty (×10ⁿ)", 3, 9, default_exp,
             key=f"exagg_{info['fullname']}",
             help="The real JPL 1σ orbit uncertainty is microscopic for catalogued "
-                 "objects, so the fan is exaggerated to be visible. This is a "
+                 "objects, so the cone is exaggerated to be visible. This is a "
                  "geometric what-if, NOT a JPL impact probability.")
-        factor = 10.0 ** exp
 
-        fig, dmin, fan_dists = orbit_figure(r, info["moid"], info["sigmas"], factor)
+        fig, dmin, lo, hi = orbit_figure(r, info["sigmas"], exp)
         st.plotly_chart(fig, use_container_width=True,
                         config={"displayModeBar": False})
 
@@ -302,23 +339,22 @@ if (run or st.session_state.pop("go", False)) and name.strip():
                           "real orbit vs the circle drawn.")
 
         # Collision forecast: how the close-approach distance spreads across the
-        # exaggerated uncertainty fan. Honest framing — not an impact probability.
-        st.markdown("**Collision forecast** — nominal vs the uncertainty fan")
+        # exaggerated uncertainty cone. Honest framing — not an impact probability.
+        st.markdown("**Collision forecast** — nominal vs the uncertainty cone")
         LD = 0.00257  # 1 lunar distance in AU
-        lo, hi = float(fan_dists.min()), float(fan_dists.max())
         fc = st.columns(2)
         fc[0].metric("Nominal closest approach", f"{dmin / LD:.1f} lunar dist",
                      help=f"{dmin:.4f} AU. 1 lunar distance = {LD} AU.")
-        fc[1].metric(f"Fan at ×10^{exp}", f"{lo / LD:.1f} – {hi / LD:.1f} LD",
+        fc[1].metric(f"Cone at ×10^{exp}", f"{lo / LD:.1f} – {hi / LD:.1f} LD",
                      help=f"{lo:.4f} – {hi:.4f} AU across orbits sampled within "
                           f"the (exaggerated) 1σ uncertainty.")
         st.caption(
             f"Even with the real orbit uncertainty blown up **×10^{exp}**, the "
-            f"closest the fan brings this object is **{lo / LD:.1f} lunar "
+            f"closest the cone brings this object is **{lo / LD:.1f} lunar "
             f"distances** ({lo:.4f} AU) — Earth is {0.0000426 / LD:.4f} LD wide for "
-            "scale. The fan is a geometric sensitivity sketch from JPL's per-element "
+            "scale. The cone is a geometric sensitivity sketch from JPL's per-element "
             "1σ, not a real impact probability (that needs the full covariance and "
-            "time integration). The tighter the fan collapses as you lower the "
+            "time integration). The tighter the cone collapses as you lower the "
             "exaggeration, the better-pinned the orbit.")
 
         if info["moid"] is not None:
