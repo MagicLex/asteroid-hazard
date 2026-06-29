@@ -11,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import hopsworks
 
-TAG = "astjun29"
+TAG = "albedo"
 OUT = Path(__file__).resolve().parent / "model" / "progression.png"
 
 

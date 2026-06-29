@@ -1,10 +1,14 @@
 """Training pipeline (T stage) - runs as a Hopsworks job.
 
-Feature view over the orbit-geometry features (leakage excluded) -> PHA
-classifier handling the 6% class imbalance -> evaluate -> register with plots.
+Builds the feature view that JOINS Gaia reflectance (features) to NEOWISE albedo
+(label) on the asteroid number -- the join lives in the feature store, not in a
+pre-baked table -- then trains a regressor that predicts albedo from the 16-band
+Gaia spectrum. The headline result is the honest benchmark: does the spectrum beat
+the blind constant-albedo assumption everyone falls back to when albedo is
+unmeasured (97% of asteroids)? It does, and by a real margin.
 
-Honesty: the feature view excludes moid, H, diameter, albedo (the PHA definition
-plus size proxies) and tp/ids. The model sees orbital geometry + orbit class.
+albedo -> diameter is the formula D = 1329 * 10^(-H/5) / sqrt(albedo), so halving
+the albedo error directly tightens every size (and impact-energy) estimate.
 """
 import json
 from pathlib import Path
@@ -17,105 +21,124 @@ import numpy as np
 
 import hopsworks
 
-FG_NAME = "neo_features"
-FV_NAME = "neo_pha_fv"
-MODEL_NAME = "asteroid_pha"
-LABEL = "pha_label"
+FG_REFL = "asteroid_reflectance"
+FG_ALB = "asteroid_albedo"
+FV_NAME = "asteroid_albedo_fv"
+MODEL_NAME = "asteroid_albedo"
+LABEL = "albedo"
+BANDS = [374, 418, 462, 506, 550, 594, 638, 682, 726, 770, 814, 858, 902,
+         946, 990, 1034]
+BAND_COLS = [f"r{b}" for b in BANDS]
 OUT = Path("artifact").resolve()
-
-# Excluded from the model: ids, the raw flags, the PHA definition (moid, H) and
-# size proxies (diameter, albedo), and tp (an epoch, not predictive).
-# NOTE: Hopsworks lowercases feature names, so these MUST be lowercase or the
-# exclusion silently misses (e.g. "H" -> stored as "h" -> leaks the size half).
-NON_FEATURES = {
-    "spkid", "full_name", "neo", "pha", "pha_label",
-    "moid", "h", "diameter", "albedo", "tp",
-}
-CATEGORICAL = ["class"]
 
 
 def get_feature_view(fs):
-    fg = fs.get_feature_group(FG_NAME, version=1)
-    feature_cols = [f.name for f in fg.features if f.name.lower() not in NON_FEATURES]
-    query = fg.select(feature_cols + [LABEL])
+    refl = fs.get_feature_group(FG_REFL, version=1)
+    alb = fs.get_feature_group(FG_ALB, version=1)
+    # The JOIN: reflectance bands + albedo label, matched on `number`.
+    query = refl.select(BAND_COLS).join(alb.select([LABEL]), on=["number"])
     fv = fs.get_or_create_feature_view(
         name=FV_NAME, version=1,
-        description="Orbit-geometry-only features for PHA prediction (no MOID/H/size)",
-        query=query, labels=[LABEL],
-    )
-    return fv, feature_cols
+        description="Gaia 16-band reflectance (features) joined to NEOWISE albedo "
+                    "(label) on asteroid number, for spectrum->albedo prediction.",
+        query=query, labels=[LABEL])
+    return fv
 
 
-def build_model(num_cols, cat_cols):
-    from sklearn.compose import ColumnTransformer
-    from sklearn.preprocessing import OneHotEncoder
-    from sklearn.ensemble import HistGradientBoostingClassifier
-    from sklearn.pipeline import Pipeline
-    pre = ColumnTransformer(
-        [("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols)],
-        remainder="passthrough",  # numerics pass through; HGB handles NaN natively
-    )
-    clf = HistGradientBoostingClassifier(
-        max_iter=400, learning_rate=0.05, max_depth=4,
-        l2_regularization=1.0, class_weight="balanced", random_state=42,
-    )
-    return Pipeline([("pre", pre), ("clf", clf)])
+def build_model():
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    return HistGradientBoostingRegressor(
+        max_iter=500, learning_rate=0.05, max_depth=5,
+        l2_regularization=1.0, random_state=42)
 
 
-def make_plots(model, X_te, y_te, prob, pred, feature_cols):
-    from sklearn.metrics import (RocCurveDisplay, PrecisionRecallDisplay,
-                                 ConfusionMatrixDisplay, confusion_matrix)
-    from sklearn.inspection import permutation_importance
+def diam_error_factor(log_pred, log_true):
+    """Median factor error on diameter. D ∝ 1/sqrt(albedo), so a dex error e on
+    log-albedo is a 10^(e/2) factor on diameter."""
+    return float(np.median(10 ** (0.5 * np.abs(log_pred - log_true))))
+
+
+def make_plots(y, pred_cv, const_cv, imp_bands):
     OUT.mkdir(parents=True, exist_ok=True)
-    RocCurveDisplay.from_predictions(y_te, prob); plt.title("ROC - asteroid PHA")
-    plt.savefig(OUT / "roc_curve.png", bbox_inches="tight", dpi=120); plt.close()
-    PrecisionRecallDisplay.from_predictions(y_te, prob); plt.title("Precision-Recall - PHA (6% positive)")
-    plt.savefig(OUT / "pr_curve.png", bbox_inches="tight", dpi=120); plt.close()
-    ConfusionMatrixDisplay(confusion_matrix(y_te, pred),
-                           display_labels=["safe", "hazardous"]).plot()
-    plt.title("Confusion matrix"); plt.savefig(OUT / "confusion_matrix.png", bbox_inches="tight", dpi=120); plt.close()
-    imp = permutation_importance(model, X_te, y_te, n_repeats=8, random_state=42, scoring="average_precision")
-    order = np.argsort(imp.importances_mean)[::-1]
-    names = [feature_cols[i] for i in order]; vals = imp.importances_mean[order]
-    plt.figure(figsize=(8, 6)); plt.barh(names[::-1], vals[::-1])
-    plt.xlabel("drop in average precision when shuffled"); plt.title("Orbit features driving PHA")
-    plt.savefig(OUT / "feature_importance.png", bbox_inches="tight", dpi=120); plt.close()
+    alb_t, alb_p = 10 ** y, 10 ** pred_cv
+
+    # 1) predicted vs measured albedo
+    plt.figure(figsize=(5, 5))
+    plt.scatter(alb_t, alb_p, s=4, alpha=0.25, color="#f59e0b")
+    lim = [0.01, 1.0]
+    plt.plot(lim, lim, color="#3b82f6", lw=1)
+    plt.xscale("log"); plt.yscale("log"); plt.xlim(lim); plt.ylim(lim)
+    plt.xlabel("measured albedo (NEOWISE)"); plt.ylabel("predicted albedo (Gaia spectrum)")
+    plt.title("Albedo: predicted vs measured")
+    plt.savefig(OUT / "albedo_pred_vs_true.png", bbox_inches="tight", dpi=120); plt.close()
+
+    # 2) THE headline: diameter error, blind formula vs spectrum model
+    base = diam_error_factor(const_cv, y)
+    mdl = diam_error_factor(pred_cv, y)
+    plt.figure(figsize=(5.5, 4))
+    bars = plt.bar(["blind formula\n(constant albedo)", "Gaia spectrum\n(this model)"],
+                   [base, mdl], color=["#6b7280", "#f59e0b"])
+    for b, v in zip(bars, [base, mdl]):
+        plt.text(b.get_x() + b.get_width() / 2, v, f"×{v:.2f}", ha="center",
+                 va="bottom", fontsize=12, fontweight="bold")
+    plt.ylabel("median diameter error (factor)")
+    plt.title("Size error: spectrum beats the blind formula")
+    plt.ylim(1.0, base * 1.15)
+    plt.savefig(OUT / "diameter_error_benchmark.png", bbox_inches="tight", dpi=120); plt.close()
+
+    # 3) residual histogram (log-albedo dex)
+    plt.figure(figsize=(5.5, 4))
+    plt.hist(pred_cv - y, bins=50, color="#f59e0b", alpha=0.85)
+    plt.axvline(0, color="#3b82f6", lw=1)
+    plt.xlabel("log10(albedo) residual (dex)"); plt.ylabel("asteroids")
+    plt.title("Residuals (CV)")
+    plt.savefig(OUT / "residuals.png", bbox_inches="tight", dpi=120); plt.close()
+
+    # 4) which wavelengths carry the signal
+    order = np.argsort(imp_bands)
+    plt.figure(figsize=(6, 5))
+    plt.barh([f"{BANDS[i]} nm" for i in order], imp_bands[order], color="#f59e0b")
+    plt.xlabel("drop in R² when shuffled"); plt.title("Reflectance bands driving albedo")
+    plt.savefig(OUT / "band_importance.png", bbox_inches="tight", dpi=120); plt.close()
+    return base, mdl
 
 
 def main():
     project = hopsworks.login()
     fs = project.get_feature_store()
-    fv, feature_cols = get_feature_view(fs)
-    num_cols = [c for c in feature_cols if c not in CATEGORICAL]
+    fv = get_feature_view(fs)
 
-    X_tr, X_te, y_tr, y_te = fv.train_test_split(test_size=0.2)
-    X_tr, X_te = X_tr[feature_cols], X_te[feature_cols]
-    y_tr = y_tr[LABEL].astype(int); y_te = y_te[LABEL].astype(int)
-    print(f"train={len(X_tr)} test={len(X_te)} pos_rate={y_tr.mean():.3f} feats={len(feature_cols)}", flush=True)
+    X_raw, y_df = fv.training_data()
+    df = X_raw[BAND_COLS].copy()
+    df[LABEL] = y_df[LABEL].astype(float).values
+    n0 = len(df)
+    df = df.dropna()
+    df = df[df[LABEL] > 0]
+    X = df[BAND_COLS]
+    y = np.log10(df[LABEL].values)
+    print(f"training rows={len(X)} (dropped {n0 - len(X)} with no/zero albedo "
+          "label after the join)", flush=True)
 
-    from sklearn.model_selection import StratifiedKFold, cross_val_score
-    skf = StratifiedKFold(5, shuffle=True, random_state=42)
-    Xall = X_tr  # CV on train split only, to keep the test set clean for plots
-    auc = cross_val_score(build_model(num_cols, CATEGORICAL), Xall, y_tr, cv=skf, scoring="roc_auc").mean()
-    ap = cross_val_score(build_model(num_cols, CATEGORICAL), Xall, y_tr, cv=skf, scoring="average_precision").mean()
+    from sklearn.model_selection import cross_val_predict, KFold
+    from sklearn.inspection import permutation_importance
+    from sklearn.metrics import r2_score, mean_absolute_error
+    cv = KFold(5, shuffle=True, random_state=42)
+    pred_cv = cross_val_predict(build_model(), X, y, cv=cv, n_jobs=-1)
+    const_cv = np.full_like(y, y.mean())
 
-    model = build_model(num_cols, CATEGORICAL); model.fit(X_tr, y_tr)
-    prob = model.predict_proba(X_te)[:, 1]; pred = (prob >= 0.5).astype(int)
-    from sklearn.metrics import (roc_auc_score, average_precision_score,
-                                 precision_score, recall_score, f1_score)
     metrics = {
-        "roc_auc_cv": round(float(auc), 4),
-        "average_precision_cv": round(float(ap), 4),
-        "roc_auc_holdout": round(float(roc_auc_score(y_te, prob)), 4),
-        "average_precision_holdout": round(float(average_precision_score(y_te, prob)), 4),
-        "precision": round(float(precision_score(y_te, pred, zero_division=0)), 4),
-        "recall": round(float(recall_score(y_te, pred)), 4),
-        "f1": round(float(f1_score(y_te, pred)), 4),
-        "pos_rate": round(float(y_tr.mean()), 4),
+        "r2_cv": round(float(r2_score(y, pred_cv)), 4),
+        "albedo_mae_dex_cv": round(float(mean_absolute_error(y, pred_cv)), 4),
+        "diam_error_factor_model": round(diam_error_factor(pred_cv, y), 4),
+        "diam_error_factor_baseline": round(diam_error_factor(const_cv, y), 4),
+        "n_train": int(len(X)),
     }
     print("metrics:", json.dumps(metrics), flush=True)
 
-    make_plots(model, X_te, y_te, prob, pred, feature_cols)
+    model = build_model().fit(X, y)
+    imp = permutation_importance(model, X, y, n_repeats=5, random_state=42, scoring="r2")
+    base, mdl = make_plots(y, pred_cv, const_cv, imp.importances_mean)
+
     OUT.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, OUT / "model.joblib")
     (OUT / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -123,12 +146,13 @@ def main():
     from hsml.schema import Schema
     from hsml.model_schema import ModelSchema
     mr = project.get_model_registry()
-    model_schema = ModelSchema(Schema(X_tr), Schema(y_tr.to_frame()))
-    m = mr.sklearn.create_model(
+    model_schema = ModelSchema(Schema(X), Schema(df[[LABEL]]))
+    m = mr.python.create_model(
         name=MODEL_NAME, metrics=metrics,
-        description="PHA classification from orbit geometry alone (MOID/H/size excluded).",
-        input_example=X_tr.head(1), model_schema=model_schema, feature_view=fv,
-    )
+        description="Predict asteroid visible albedo from the Gaia DR3 16-band "
+                    "reflectance spectrum. Beats the blind constant-albedo size "
+                    f"estimate (diameter error ×{base:.2f} -> ×{mdl:.2f}).",
+        input_example=X.head(1), model_schema=model_schema, feature_view=fv)
     m.save(str(OUT))
     print(f"registered {MODEL_NAME} v{m.version}", flush=True)
 

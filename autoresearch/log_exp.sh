@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 STATUS="$1"; DESC="$2"
 LOG=autoresearch/run.log
-TAG=astjun29
+TAG=albedo
 MODEL="autoresearch_${TAG}"
 
 if grep -q '^val_metric:' "$LOG"; then
@@ -31,6 +31,6 @@ python autoresearch/progression.py 2>&1 | grep -iE "wrote|skipping|error" || tru
 hops model register "$MODEL" autoresearch/model \
   --framework sklearn --metrics "val_metric=$V" \
   --description "$DESC; status=$STATUS; metric_direction=max; commit=$SHA" \
-  --feature-view neo_pha_fv 2>&1 | grep -iE "registered|version|error" || true
+  --feature-view asteroid_albedo_fv 2>&1 | grep -iE "registered|version|error" || true
 
 echo "logged $STATUS val_metric=$V ($DESC)"

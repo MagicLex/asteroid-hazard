@@ -11,7 +11,7 @@ import sys
 import pandas as pd
 import hopsworks
 
-TAG = "astjun29"
+TAG = "albedo"
 
 
 def main():

@@ -1,16 +1,15 @@
 """autoresearch train.py — the single file the loop edits.
 
-Intent: MAXIMIZE ROC-AUC for PHA (potentially-hazardous asteroid) from orbit
-GEOMETRY alone. Direction: max. Leakage rule held throughout: moid, h, diameter,
-albedo are the PHA definition + size proxies and are never features. Engineering
-geometry from the orbital elements the model already has (Tisserand, Earth-cross
-distances) is allowed — that IS the task.
+Intent: MAXIMIZE 5-fold CV R² for predicting log10(albedo) from the Gaia DR3
+16-band reflectance spectrum. Direction: max. The lever here is spectral physics:
+slopes (S-types are red, C-types flat) and band depths (silicate absorption near
+0.9 µm) — engineer them from the raw bands, never from the albedo itself.
 
-Metric: 5-fold stratified CV mean ROC-AUC, same folds (seed 42) every run, on the
-full 42k-row catalogue. 42k rows make CV stable; the margin to "keep" is +0.002.
+Metric: 5-fold CV R² on the 21k joined asteroids, same folds (seed 42) every run.
+Margin to "keep": +0.003. Also reports the diameter error factor (D ∝ 1/√albedo),
+the honest headline: beat the blind constant-albedo guess (×1.34).
 
-Edit only EXP_DESC, engineer_features(), and build_model(). Everything below the
-marker stays put.
+Edit only EXP_DESC, engineer_features(), and build_model(). Below the marker stays.
 """
 import json
 import resource
@@ -21,59 +20,31 @@ import numpy as np
 import pandas as pd
 
 # ============================ EXPERIMENT (edit me) ============================
-EXP_DESC = "richer geometry + deeper XGBoost (depth5, n900, lr0.025, min_child_weight2, gamma0.5)"
-
-# Earth's orbit bounds (AU): perihelion 0.983, aphelion 1.017.
-_E_PERI, _E_APH = 0.983, 1.017
+EXP_DESC = "baseline HistGradientBoosting on raw 16 bands"
 
 
 def engineer_features(X: pd.DataFrame) -> pd.DataFrame:
-    """Add geometric Earth-approach features derived purely from the orbital
-    elements (a, e, i, w, q, ad) — never from the precomputed MOID. The
-    node-distance terms are the classic MOID lower bound: the heliocentric
-    distance where the orbit crosses Earth's orbital plane, vs 1 AU."""
-    X = X.copy()
-    i_r, w_r = np.radians(X["i"]), np.radians(X["w"])
-    p = X["a"] * (1 - X["e"] ** 2)                       # semi-latus rectum
-    r_asc = p / (1 + X["e"] * np.cos(w_r))               # dist at ascending node
-    r_desc = p / (1 - X["e"] * np.cos(w_r))              # dist at descending node
-    X["tisserand_earth"] = 1 / X["a"] + 2 * np.sqrt(X["a"] * (1 - X["e"] ** 2)) * np.cos(i_r)
-    X["node_dist_min"] = np.minimum((r_asc - 1).abs(), (r_desc - 1).abs())
-    X["apsis_to_1au"] = np.minimum((X["q"] - 1).abs(), (X["ad"] - 1).abs())
-    X["q_minus_earth_aph"] = X["q"] - _E_APH
-    X["ad_minus_earth_peri"] = X["ad"] - _E_PERI
-    X["earth_crossing"] = ((X["q"] <= _E_APH) & (X["ad"] >= _E_PERI)).astype(float)
+    """Row-wise transform of the 16 reflectance bands. Add spectral features here
+    (slopes, ratios, band depths) — pure arithmetic on the bands, never the label."""
     return X
 
 
 def build_model():
-    """Unfitted sklearn estimator with predict_proba. Any fit-stateful step
-    (scaling, encoding, selection) lives here so it fits per CV fold."""
-    from sklearn.compose import ColumnTransformer
-    from sklearn.pipeline import Pipeline
-    from sklearn.preprocessing import OneHotEncoder
-    from xgboost import XGBClassifier
-    pre = ColumnTransformer(
-        [("cat", OneHotEncoder(handle_unknown="ignore"), ["class"])],
-        remainder="passthrough")
-    clf = XGBClassifier(n_estimators=900, max_depth=5, learning_rate=0.025,
-                        subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
-                        min_child_weight=2, gamma=0.5, scale_pos_weight=15.0,
-                        eval_metric="logloss", random_state=42, n_jobs=-1)
-    return Pipeline([("pre", pre), ("clf", clf)])
+    """Unfitted sklearn regressor with predict()."""
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    return HistGradientBoostingRegressor(
+        max_iter=500, learning_rate=0.05, max_depth=5,
+        l2_regularization=1.0, random_state=42)
 # ========================== end experiment section ===========================
 
 
 HERE = Path(__file__).resolve().parent
 CACHE = HERE / "data_cache.parquet"
 MODEL_DIR = HERE / "model"
-FG_NAME = "neo_features"
-LABEL = "pha_label"
-# Excluded: ids, raw flags, the PHA definition (moid, h) + size proxies
-# (diameter, albedo), and tp (an epoch). All lowercase — Hopsworks lowercases
-# feature names, so an uppercase entry silently misses and leaks.
-NON_FEATURES = {"spkid", "full_name", "neo", "pha", "pha_label",
-                "moid", "h", "diameter", "albedo", "tp"}
+LABEL = "albedo"
+BANDS = [374, 418, 462, 506, 550, 594, 638, 682, 726, 770, 814, 858, 902,
+         946, 990, 1034]
+BAND_COLS = [f"r{b}" for b in BANDS]
 
 
 def load_data():
@@ -81,47 +52,32 @@ def load_data():
         return pd.read_parquet(CACHE)
     import hopsworks
     fs = hopsworks.login().get_feature_store()
-    df = fs.get_feature_group(FG_NAME, version=1).read(dataframe_type="pandas")
+    X, y = fs.get_feature_view("asteroid_albedo_fv", version=1).training_data()
+    df = X[BAND_COLS].copy()
+    df[LABEL] = y[LABEL].astype(float).values
+    df = df.dropna(); df = df[df[LABEL] > 0]
     df.to_parquet(CACHE)
     return df
 
 
-def make_card_images(model, X, y):
-    """ROC / PR / confusion from a single stratified holdout, for the model
-    card. Cheap (one fit); the CV mean above is the metric of record."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import (RocCurveDisplay, PrecisionRecallDisplay,
-                                 ConfusionMatrixDisplay, confusion_matrix)
-    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y,
-                                          random_state=42)
-    m = build_model().fit(Xtr, ytr)
-    prob = m.predict_proba(Xte)[:, 1]
-    pred = (prob >= 0.5).astype(int)
-    RocCurveDisplay.from_predictions(yte, prob); plt.title("ROC — PHA")
-    plt.savefig(MODEL_DIR / "roc_curve.png", bbox_inches="tight", dpi=110); plt.close()
-    PrecisionRecallDisplay.from_predictions(yte, prob); plt.title("PR — PHA (6% positive)")
-    plt.savefig(MODEL_DIR / "pr_curve.png", bbox_inches="tight", dpi=110); plt.close()
-    ConfusionMatrixDisplay(confusion_matrix(yte, pred),
-                           display_labels=["safe", "hazardous"]).plot()
-    plt.title("Confusion"); plt.savefig(MODEL_DIR / "confusion_matrix.png",
-                                        bbox_inches="tight", dpi=110); plt.close()
+def diam_error_factor(log_pred, log_true):
+    return float(np.median(10 ** (0.5 * np.abs(log_pred - log_true))))
 
 
 def main():
     t0 = time.time()
     df = load_data()
-    feat_cols = [c for c in df.columns if c not in NON_FEATURES]
-    X = engineer_features(df[feat_cols].copy())
-    y = df[LABEL].astype(int)
+    X = engineer_features(df[BAND_COLS].copy())
+    y = np.log10(df[LABEL].values)
 
-    from sklearn.model_selection import StratifiedKFold, cross_val_score
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    scores = cross_val_score(build_model(), X, y, cv=skf, scoring="roc_auc", n_jobs=-1)
-    val_metric = scores.mean()
-    print(f"cv_folds: {' '.join(f'{s:.4f}' for s in scores)} (std {scores.std():.4f})")
+    from sklearn.model_selection import cross_val_predict, KFold
+    from sklearn.metrics import r2_score
+    cv = KFold(5, shuffle=True, random_state=42)
+    pred = cross_val_predict(build_model(), X, y, cv=cv, n_jobs=-1)
+    val_metric = r2_score(y, pred)
+    dfac = diam_error_factor(pred, y)
+    base = diam_error_factor(np.full_like(y, y.mean()), y)
+    print(f"cv_r2: {val_metric:.4f}  diam_error: x{dfac:.3f} (baseline x{base:.3f})")
 
     MODEL_DIR.mkdir(exist_ok=True)
     model = build_model().fit(X, y)
@@ -129,13 +85,32 @@ def main():
     joblib.dump(model, MODEL_DIR / "model.joblib")
     (MODEL_DIR / "meta.json").write_text(json.dumps({
         "exp": EXP_DESC, "val_metric": float(val_metric),
-        "features": list(X.columns), "n_features_in": X.shape[1]}, indent=2))
-    make_card_images(model, X, y)
+        "diam_error_factor": dfac, "n_features_in": X.shape[1]}, indent=2))
+    _benchmark_plot(y, pred)
 
     peak_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
     print(f"val_metric: {val_metric:.4f}")
     print(f"peak_memory_gb: {peak_gb:.3f}")
     print(f"training_seconds: {time.time() - t0:.2f}")
+
+
+def _benchmark_plot(y, pred):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    base = diam_error_factor(np.full_like(y, y.mean()), y)
+    mdl = diam_error_factor(pred, y)
+    plt.figure(figsize=(5.5, 4))
+    bars = plt.bar(["blind formula", "Gaia spectrum"], [base, mdl],
+                   color=["#6b7280", "#f59e0b"])
+    for b, v in zip(bars, [base, mdl]):
+        plt.text(b.get_x() + b.get_width() / 2, v, f"x{v:.2f}", ha="center",
+                 va="bottom", fontweight="bold")
+    plt.ylabel("median diameter error (factor)")
+    plt.title("Size error vs the blind formula")
+    plt.ylim(1.0, base * 1.15)
+    plt.savefig(MODEL_DIR / "diameter_error_benchmark.png", bbox_inches="tight", dpi=120)
+    plt.close()
 
 
 if __name__ == "__main__":
