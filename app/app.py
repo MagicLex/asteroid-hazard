@@ -129,44 +129,19 @@ def _sphere(center, radius, color, n=18):
                       lighting=dict(ambient=0.6, diffuse=0.8))
 
 
-def _tube(nominal, samples, stride=2, ring=16):
-    """A translucent tube enveloping the sampled orbits: at each step along the
-    nominal orbit, a ring whose radius is how far the samples wander there. The
-    radius grows where the orbit is least certain, so it reads as a cone/horn —
-    one surface, far lighter than dozens of separate orbit lines."""
-    P = nominal[:, ::stride]                               # 3 x M
-    S = np.stack([s[:, ::stride] for s in samples])        # K x 3 x M
-    rad = np.linalg.norm(S - P[None], axis=1).max(axis=0)  # M, enveloping radius
-    T = np.gradient(P, axis=1)
-    T /= (np.linalg.norm(T, axis=0) + 1e-12)               # unit tangents
-    M = P.shape[1]
-    ref = np.tile(np.array([0.0, 0.0, 1.0])[:, None], (1, M))
-    bad = np.abs((T * ref).sum(0)) > 0.95                  # tangent near-vertical
-    ref[:, bad] = np.array([1.0, 0.0, 0.0])[:, None]
-    n1 = np.cross(T.T, ref.T).T; n1 /= (np.linalg.norm(n1, axis=0) + 1e-12)
-    n2 = np.cross(T.T, n1.T).T;  n2 /= (np.linalg.norm(n2, axis=0) + 1e-12)
-    th = np.linspace(0, 2 * np.pi, ring)
-    cx, sx, rr = np.cos(th)[None, :], np.sin(th)[None, :], rad[:, None]
-    xx = P[0][:, None] + rr * (cx * n1[0][:, None] + sx * n2[0][:, None])
-    yy = P[1][:, None] + rr * (cx * n1[1][:, None] + sx * n2[1][:, None])
-    zz = P[2][:, None] + rr * (cx * n1[2][:, None] + sx * n2[2][:, None])
-    return xx, yy, zz
-
-
 @st.cache_data(show_spinner=False)
-def _orbit_geometry(elem, sig, exp, k=12, nh=720, nl=240):
+def _orbit_geometry(elem, sig, exp, k=14, nh=720, nl=360):
     """Cached geometry for the 3D view, keyed on (elements, sigmas, exp). Moving
     the slider recomputes only on a real change, and revisited values are instant.
-    The nominal closest approach is computed at high resolution (nh); the cone and
-    its spread use a coarser grid (nl) — the headline number stays accurate, the
-    what-if cone stays cheap."""
+    Returns the nominal orbit (high-res, accurate closest approach) plus the single
+    worst-case variation orbit — the sampled orbit that passes closest to Earth —
+    and the close-approach spread."""
     a, e, i, om, w = elem
     factor = 10.0 ** exp
     earth_hi = orbit_xyz(1.0, 0.0167, 0.0, 0.0, 102.9, nh)
     nominal = orbit_xyz(a, e, i, om, w, nh)
     dmin, pa, pe = closest_pair(nominal, earth_hi)
     earth_lo = orbit_xyz(1.0, 0.0167, 0.0, 0.0, 102.9, nl)
-    nominal_lo = orbit_xyz(a, e, i, om, w, nl)
     rng = np.random.default_rng(0)                         # seeded → stable
     sa, se, si, som, sw = sig
     samples, dists = [], []
@@ -178,27 +153,28 @@ def _orbit_geometry(elem, sig, exp, k=12, nh=720, nl=240):
                       w + rng.standard_normal() * sw * factor, nl)
         samples.append(o)
         dists.append(closest_pair(o, earth_lo)[0])
-    xx, yy, zz = _tube(nominal_lo, samples)
-    return (earth_hi, nominal, xx, yy, zz, pa, pe, float(dmin),
-            float(min(dists)), float(max(dists)))
+    dists = np.array(dists)
+    worst = samples[int(dists.argmin())]                   # passes closest to Earth
+    return (earth_hi, nominal, worst, pa, pe, float(dmin),
+            float(dists.min()), float(dists.max()))
 
 
 def orbit_figure(row, sigmas, exp):
     """3D heliocentric view from cached geometry: Sun, Earth's orbit, the nominal
-    asteroid orbit, a translucent uncertainty cone, and the closest approach.
+    asteroid orbit, the worst-case variation orbit, and the closest approach.
     Returns the figure plus the close-approach numbers for the readout."""
     elem = (row["a"], row["e"], row["i"], row["om"], row["w"])
     sig = tuple(sigmas.get(c, 0.0) for c in ["a", "e", "i", "om", "w"])
-    earth, nominal, xx, yy, zz, pa, pe, dmin, lo, hi = _orbit_geometry(elem, sig, exp)
+    earth, nominal, worst, pa, pe, dmin, lo, hi = _orbit_geometry(elem, sig, exp)
 
     fig = go.Figure()
-    fig.add_trace(go.Surface(
-        x=xx, y=yy, z=zz, opacity=0.30, showscale=False, hoverinfo="skip",
-        colorscale=[[0, "#f59e0b"], [1, "#f59e0b"]], name="uncertainty cone",
-        showlegend=True, lighting=dict(ambient=0.75, diffuse=0.4)))
     fig.add_trace(go.Scatter3d(
         x=earth[0], y=earth[1], z=earth[2], mode="lines", name="Earth orbit",
         line=dict(color="#3b82f6", width=5), hoverinfo="name"))
+    fig.add_trace(go.Scatter3d(
+        x=worst[0], y=worst[1], z=worst[2], mode="lines", hoverinfo="name",
+        name=f"worst case within ×10^{exp}",
+        line=dict(color="#f472b6", width=3, dash="dot")))
     fig.add_trace(go.Scatter3d(
         x=nominal[0], y=nominal[1], z=nominal[2], mode="lines",
         name="Asteroid orbit (nominal)", line=dict(color="#f59e0b", width=5),
@@ -306,9 +282,9 @@ if st.session_state.get("scored"):
     st.subheader("The orbit, in 3D")
     st.caption("Drag to rotate (the view pivots on the Sun), scroll to zoom. "
                "Earth's orbit in blue, the asteroid's nominal orbit in bright "
-               "orange. The translucent orange cone is where the orbit could lie "
-               "within its uncertainty; the red dashed line is the closest the "
-               "nominal orbits come.")
+               "orange. The pink dotted line is the worst-case variation within "
+               "the (exaggerated) uncertainty — the one that passes closest to "
+               "Earth; the red dashed line is the nominal closest approach.")
     if r["a"] and r["e"] is not None and r["i"] is not None:
         # Auto-pick an exaggeration so the cone is visible: real 1-sigma is tiny
         # (these orbits are very well determined), so scale it up and SAY so.
@@ -339,23 +315,23 @@ if st.session_state.get("scored"):
                           "real orbit vs the circle drawn.")
 
         # Collision forecast: how the close-approach distance spreads across the
-        # exaggerated uncertainty cone. Honest framing — not an impact probability.
-        st.markdown("**Collision forecast** — nominal vs the uncertainty cone")
+        # exaggerated variation orbits. Honest framing — not an impact probability.
+        st.markdown("**Collision forecast** — nominal vs worst-case variation")
         LD = 0.00257  # 1 lunar distance in AU
         fc = st.columns(2)
         fc[0].metric("Nominal closest approach", f"{dmin / LD:.1f} lunar dist",
                      help=f"{dmin:.4f} AU. 1 lunar distance = {LD} AU.")
-        fc[1].metric(f"Cone at ×10^{exp}", f"{lo / LD:.1f} – {hi / LD:.1f} LD",
+        fc[1].metric(f"Worst case at ×10^{exp}", f"{lo / LD:.1f} – {hi / LD:.1f} LD",
                      help=f"{lo:.4f} – {hi:.4f} AU across orbits sampled within "
                           f"the (exaggerated) 1σ uncertainty.")
         st.caption(
             f"Even with the real orbit uncertainty blown up **×10^{exp}**, the "
-            f"closest the cone brings this object is **{lo / LD:.1f} lunar "
+            f"closest any variation brings this object is **{lo / LD:.1f} lunar "
             f"distances** ({lo:.4f} AU) — Earth is {0.0000426 / LD:.4f} LD wide for "
-            "scale. The cone is a geometric sensitivity sketch from JPL's per-element "
+            "scale. This is a geometric sensitivity sketch from JPL's per-element "
             "1σ, not a real impact probability (that needs the full covariance and "
-            "time integration). The tighter the cone collapses as you lower the "
-            "exaggeration, the better-pinned the orbit.")
+            "time integration). The closer the worst case sits to the nominal as you "
+            "lower the exaggeration, the better-pinned the orbit.")
 
         if info["moid"] is not None:
             hazard_geom = info["moid"] <= 0.05
