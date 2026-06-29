@@ -21,12 +21,28 @@ import numpy as np
 import pandas as pd
 
 # ============================ EXPERIMENT (edit me) ============================
-EXP_DESC = "XGBoost (n600, depth4, lr0.03, scale_pos_weight for 6% imbalance)"
+EXP_DESC = "XGBoost + orbital-mechanics geometry (node-distance MOID proxy, Tisserand, Earth-crossing)"
+
+# Earth's orbit bounds (AU): perihelion 0.983, aphelion 1.017.
+_E_PERI, _E_APH = 0.983, 1.017
 
 
 def engineer_features(X: pd.DataFrame) -> pd.DataFrame:
-    """Row-wise, stateless transform of the orbit-element frame. Keep 'class'
-    as a string column; build_model() one-hot encodes it per fold."""
+    """Add geometric Earth-approach features derived purely from the orbital
+    elements (a, e, i, w, q, ad) — never from the precomputed MOID. The
+    node-distance terms are the classic MOID lower bound: the heliocentric
+    distance where the orbit crosses Earth's orbital plane, vs 1 AU."""
+    X = X.copy()
+    i_r, w_r = np.radians(X["i"]), np.radians(X["w"])
+    p = X["a"] * (1 - X["e"] ** 2)                       # semi-latus rectum
+    r_asc = p / (1 + X["e"] * np.cos(w_r))               # dist at ascending node
+    r_desc = p / (1 - X["e"] * np.cos(w_r))              # dist at descending node
+    X["tisserand_earth"] = 1 / X["a"] + 2 * np.sqrt(X["a"] * (1 - X["e"] ** 2)) * np.cos(i_r)
+    X["node_dist_min"] = np.minimum((r_asc - 1).abs(), (r_desc - 1).abs())
+    X["apsis_to_1au"] = np.minimum((X["q"] - 1).abs(), (X["ad"] - 1).abs())
+    X["q_minus_earth_aph"] = X["q"] - _E_APH
+    X["ad_minus_earth_peri"] = X["ad"] - _E_PERI
+    X["earth_crossing"] = ((X["q"] <= _E_APH) & (X["ad"] >= _E_PERI)).astype(float)
     return X
 
 
