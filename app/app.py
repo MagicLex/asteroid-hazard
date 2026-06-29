@@ -48,19 +48,16 @@ def load_model():
 
 
 @st.cache_data(ttl=86400)
-def gaia_numbers():
-    """Numbered asteroids that have a Gaia spectrum, for the random pick."""
-    try:
-        r = requests.get(TAP, params={"REQUEST": "doQuery", "LANG": "ADQL",
-                         "FORMAT": "json", "MAXREC": "100000",
-                         "QUERY": 'SELECT "MPC" FROM "I/359/ssor" '
-                         'WHERE "lambda"=374 AND "MPC" IS NOT NULL'}, timeout=60)
-        nums = [int(row[0]) for row in r.json()["data"] if row[0]]
-        if nums:
-            return nums
-    except Exception:
-        pass
-    return list(range(1, 1001))  # fallback: low numbers mostly have spectra
+def random_pool():
+    """Asteroids that have a Gaia spectrum but NO NEOWISE albedo — the model's
+    actual target population. Random picks from here so the 'NASA never measured
+    this, here's ours' case actually shows up."""
+    import hopsworks
+    fs = hopsworks.login().get_feature_store()
+    refl = set(fs.get_feature_group("asteroid_reflectance", 1).select(["number"]).read()["number"])
+    alb = set(fs.get_feature_group("asteroid_albedo", 1).select(["number"]).read()["number"])
+    pool = sorted(refl - alb)
+    return pool or sorted(refl)
 
 
 @st.cache_data(ttl=3600)
@@ -159,6 +156,77 @@ def scale_label(mt):
     return out
 
 
+def size_figure(d_model_m, d_blind_m):
+    """The two sizes superposed, to scale: our spectrum-based diameter (amber) vs
+    the blind constant-albedo guess (grey dashed). A 300 m reference ring (≈ the
+    Eiffel tower's height) gives a human sense of scale."""
+    R = max(d_model_m, d_blind_m, 300) / 2
+    fig = go.Figure()
+    for d, color, fill, name in (
+            (d_blind_m, "#6b7280", "rgba(107,114,128,0.18)", "blind 0.14 guess"),
+            (d_model_m, "#f59e0b", "rgba(245,158,11,0.40)", "our estimate")):
+        fig.add_shape(type="circle", x0=-d/2, y0=-d/2, x1=d/2, y1=d/2,
+                      line=dict(color=color, width=2,
+                                dash="dash" if color == "#6b7280" else "solid"),
+                      fillcolor=fill, layer="below" if color == "#6b7280" else "above")
+    fig.add_shape(type="line", x0=-150, y0=-R * 0.95, x1=150, y1=-R * 0.95,
+                  line=dict(color="#cbd5e1", width=2))
+    fig.add_annotation(x=0, y=-R * 0.95, text="300 m", yshift=10,
+                       showarrow=False, font=dict(color="#cbd5e1", size=11))
+    fig.update_xaxes(range=[-R * 1.1, R * 1.1], visible=False,
+                     scaleanchor="y", scaleratio=1)
+    fig.update_yaxes(range=[-R * 1.1, R * 1.1], visible=False)
+    fig.update_layout(height=300, paper_bgcolor="#0b0e11", plot_bgcolor="#0b0e11",
+                      margin=dict(l=0, r=0, t=30, b=0), showlegend=False,
+                      title=dict(text="Size: ours (amber) vs the blind guess (grey)",
+                                 font=dict(color="#cbd5e1", size=13)))
+    return fig
+
+
+def _circle(lat0, lon0, r_km, n=64):
+    th = np.linspace(0, 2 * np.pi, n)
+    dlat = (r_km / 111.0) * np.cos(th)
+    dlon = (r_km / (111.0 * np.cos(np.radians(lat0)))) * np.sin(th)
+    return lat0 + dlat, lon0 + dlon
+
+
+def blast_rings(energy_mt, crater_km):
+    """Damage radii (km). Overpressure/thermal radii scale as energy^(1/3)."""
+    c = max(energy_mt, 1e-6) ** (1 / 3)
+    return [("Windows shatter (1 psi)", 17.0 * c, "rgba(59,130,246,0.18)", "#3b82f6"),
+            ("3rd-degree burns", 12.0 * c, "rgba(251,191,36,0.20)", "#fbbf24"),
+            ("Most buildings collapse (5 psi)", 6.5 * c, "rgba(245,158,11,0.28)", "#f59e0b"),
+            ("Total destruction (20 psi)", 2.7 * c, "rgba(239,68,68,0.38)", "#ef4444"),
+            ("Crater", crater_km / 2, "rgba(124,45,18,0.85)", "#7c2d12")]
+
+
+def impact_map(rings, lat, lon, city):
+    fig = go.Figure()
+    for name, r, fillc, line in rings:
+        if r <= 0:
+            continue
+        la, lo = _circle(lat, lon, r)
+        fig.add_trace(go.Scattermapbox(lat=la, lon=lo, fill="toself",
+                      fillcolor=fillc, line=dict(color=line, width=1),
+                      name=f"{name} — {r:.1f} km", hoverinfo="name"))
+    fig.add_trace(go.Scattermapbox(lat=[lat], lon=[lon], mode="markers",
+                  marker=dict(size=10, color="#ffffff"), hoverinfo="skip",
+                  showlegend=False))
+    maxr = max((r for _, r, _, _ in rings), default=10)
+    zoom = float(np.clip(8.3 - np.log2(max(maxr, 1)), 1, 11))
+    fig.update_layout(height=430, margin=dict(l=0, r=0, t=10, b=0),
+                      mapbox=dict(style="open-street-map",
+                                  center=dict(lat=lat, lon=lon), zoom=zoom),
+                      legend=dict(font=dict(color="#cbd5e1", size=10), x=0, y=1,
+                                  bgcolor="rgba(11,14,17,0.6)"),
+                      paper_bgcolor="#0b0e11")
+    return fig
+
+
+CITIES = {"Paris": (48.8566, 2.3522), "New York": (40.7128, -74.0060),
+          "Tokyo": (35.6762, 139.6503), "London": (51.5074, -0.1278)}
+
+
 # ---------------------------------------------------------------- UI
 st.markdown(
     """<div style="background:linear-gradient(90deg,#0b0e11,#1a1f2b);
@@ -171,7 +239,7 @@ st.write("")
 
 if "ast" not in st.session_state:
     st.session_state.ast = "4"
-c1, c2 = st.columns([3, 1])
+c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
 c1.text_input("Asteroid number or name", key="ast",
               placeholder="4, 21, Vesta, Eros, Ceres, ...")
 assess = c2.button("Assess", type="primary", use_container_width=True)
@@ -188,7 +256,7 @@ pcols = st.columns(len(POPULAR) + 1)
 for col, (num, nm) in zip(pcols, POPULAR):
     col.button(nm, on_click=_pick, args=(num,), use_container_width=True)
 pcols[-1].button("🎲 Random", use_container_width=True,
-                 on_click=lambda: _pick(random.choice(gaia_numbers())))
+                 on_click=lambda: _pick(random.choice(random_pool())))
 st.caption("Popular targets, a random draw, or type any of the 34,577 numbered "
            "asteroids with a Gaia DR3 spectrum.")
 
@@ -210,14 +278,13 @@ if assess or st.session_state.get("assessed"):
     title = phys.get("fullname") or f"{spec['number']} {spec['name']}"
     st.subheader(f"☄️ {title}")
 
+    # ---- row 1: spectrum + albedo face-off | size render
     left, right = st.columns([1, 1])
-
-    # ---- left: the spectrum + the albedo face-off
     with left:
         fig = go.Figure(go.Scatter(
             x=BANDS, y=spec["spectrum"], mode="lines+markers",
             line=dict(color="#f59e0b", width=3), marker=dict(size=5)))
-        fig.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10),
+        fig.update_layout(height=240, margin=dict(l=10, r=10, t=30, b=10),
                           paper_bgcolor="#0b0e11", plot_bgcolor="#0b0e11",
                           title=dict(text="Gaia DR3 reflectance spectrum",
                                      font=dict(color="#cbd5e1", size=13)),
@@ -227,50 +294,64 @@ if assess or st.session_state.get("assessed"):
                                      gridcolor="#1f2937"))
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-        st.markdown("**Albedo: NASA vs us**")
-        a, b = st.columns(2)
         if meas_alb is not None:
+            m_err = abs(pred_alb - meas_alb) / meas_alb * 100
+            b_err = abs(0.14 - meas_alb) / meas_alb * 100
+            st.markdown("**Albedo: NASA vs us vs the blind guess**")
+            a, b, c = st.columns(3)
             a.metric("Measured (NASA)", f"{meas_alb:.3f}")
-            err = abs(pred_alb - meas_alb) / meas_alb * 100
-            b.metric("Predicted (our model)", f"{pred_alb:.3f}", f"{err:.0f}% off",
-                     delta_color="off")
-            st.caption("This one NASA *has* measured — so you can check us. "
-                       "For the 97% they haven't, ours is the only number going.")
+            b.metric("Our model", f"{pred_alb:.3f}", f"{m_err:.0f}% off", delta_color="off")
+            c.metric("Blind 0.14", "0.140", f"{b_err:.0f}% off", delta_color="off")
+            if m_err < b_err:
+                st.caption(f"Not perfect ({m_err:.0f}% off here) — but the blind 0.14 "
+                           f"fallback is {b_err:.0f}% off on the *same* rock, so we're "
+                           f"**{b_err/max(m_err,1):.1f}× closer**. Across all measured "
+                           "objects we halve the median error.")
+            else:
+                st.caption(f"On this one the blind guess lands closer ({b_err:.0f}% vs "
+                           f"{m_err:.0f}%) — it does, sometimes. Across all objects we "
+                           "still halve the median error.")
         else:
-            a.metric("Measured (NASA)", "— not measured —")
-            b.metric("Predicted (our model)", f"{pred_alb:.3f}")
-            st.caption("NASA never measured this asteroid's albedo. The blind "
-                       "fallback assumes 0.14 for everything; **we read it off the "
-                       "Gaia spectrum instead.** 😎")
+            st.markdown("**Albedo: NASA vs us**")
+            a, b = st.columns(2)
+            a.metric("Measured (NASA)", "— none —")
+            b.metric("Our model", f"{pred_alb:.3f}")
+            st.caption("NASA never measured this one. Everyone else assumes 0.14; "
+                       "**we read it off the Gaia spectrum.** 😎")
 
-    # ---- right: size + impact
+    D = diameter_km(H, pred_alb)
+    D_blind = diameter_km(H, 0.14)
     with right:
-        alb_for_size = meas_alb if meas_alb is not None else pred_alb
-        D = diameter_km(H, alb_for_size)
-        D_blind = diameter_km(H, 0.14)
         if D is None:
             st.info("No absolute magnitude H from JPL — cannot size this object.")
         else:
-            v = impact_velocity(phys.get("a"), phys.get("e"), phys.get("i"))
-            sc = impact_scenario(D, alb_for_size, v)
-            s1, s2 = st.columns(2)
-            s1.metric("Diameter (our albedo)", f"{D*1000:,.0f} m"
-                      if D < 1 else f"{D:.2f} km")
-            if meas_alb is None and D_blind:
-                s2.metric("If you'd assumed 0.14", f"{D_blind*1000:,.0f} m"
-                          if D_blind < 1 else f"{D_blind:.2f} km",
-                          f"{(D/D_blind-1)*100:+.0f}%", delta_color="off")
-            st.caption(f"Inferred type: **{sc['taxon']}**, density "
-                       f"{sc['density']} g/cm³.")
+            st.plotly_chart(size_figure(D * 1000, D_blind * 1000),
+                            use_container_width=True, config={"displayModeBar": False})
+            sz = f"{D*1000:,.0f} m" if D < 1 else f"{D:.2f} km"
+            szb = f"{D_blind*1000:,.0f} m" if D_blind < 1 else f"{D_blind:.2f} km"
+            d1, d2 = st.columns(2)
+            d1.metric("Our diameter", sz)
+            d2.metric("Blind-guess diameter", szb, f"{(D/D_blind-1)*100:+.0f}%",
+                      delta_color="off")
 
-            st.markdown("**☢️ If it hit Earth**")
-            i1, i2 = st.columns(2)
-            i1.metric("Impact energy", f"{sc['energy_mt']:,.0f} Mt"
-                      if sc['energy_mt'] >= 1 else f"{sc['energy_mt']:.2f} Mt")
-            i2.metric("Crater", f"{sc['crater_km']:.1f} km"
+    # ---- row 2: impact on a real map
+    if D is not None:
+        v = impact_velocity(phys.get("a"), phys.get("e"), phys.get("i"))
+        sc = impact_scenario(D, pred_alb, v)
+        st.markdown("### ☢️ If it hit Earth")
+        info, mapc = st.columns([1, 2])
+        with info:
+            city = st.selectbox("Drop it on", list(CITIES))
+            st.metric("Impact energy", f"{sc['energy_mt']:,.0f} Mt"
+                      if sc['energy_mt'] >= 1 else f"{sc['energy_mt']:.3f} Mt")
+            st.metric("Crater", f"{sc['crater_km']:.1f} km"
                       if sc['crater_km'] >= 1 else f"{sc['crater_km']*1000:,.0f} m")
-            st.caption(f"Hypothetical vertical impact at **{v:.0f} km/s** "
-                       f"(from the orbit). Energy {scale_label(sc['energy_mt'])}.")
+            st.caption(f"Type **{sc['taxon']}**, density {sc['density']} g/cm³. "
+                       f"Hypothetical vertical hit at **{v:.0f} km/s**. "
+                       f"Energy {scale_label(sc['energy_mt'])}.")
+        rings = blast_rings(sc["energy_mt"], sc["crater_km"])
+        mapc.plotly_chart(impact_map(rings, *CITIES[city], city),
+                          use_container_width=True, config={"displayModeBar": False})
 
     with st.expander("How this works (and what's honest about it)"):
         st.markdown(

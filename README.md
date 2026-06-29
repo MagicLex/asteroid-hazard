@@ -9,14 +9,20 @@ One small ML system per day on Hopsworks.
 
 **97% of known asteroids have no measured size.** Size is what decides whether an
 impact is a city-killer or a footnote, and it follows from the albedo (how
-reflective the rock is) — but measuring albedo needs thermal-infrared from a space
+reflective the rock is), but measuring albedo needs thermal-infrared from a space
 telescope, which we only have for ~3% of objects. For the rest, everyone falls
 back to a blind guess: *assume albedo ≈ 0.14 and convert brightness to size.*
 
 This system does better. It reads the albedo off the asteroid's **Gaia DR3
 reflectance spectrum** (cheap, available for 60,000 asteroids) and turns it into a
 size, and a size into an impact scenario. For the objects nobody has measured,
-it's the only number going — and it's measurably sharper than the blind guess.
+it's the only number going, and it's measurably sharper than the blind guess.
+
+The error compounds: mass and impact energy scale as diameter cubed, so the blind
+guess's typical ×1.4 size miss is roughly a ×3 error in the energy you'd use to
+rank an object's threat, in a direction nobody can see, for the uncharacterized
+majority. Halving the size error is the cheapest way to make that triage less
+blind.
 
 ## Result
 
@@ -39,7 +45,7 @@ albedo is a tighter size, mass, and impact energy for every uncharacterized obje
 This project started as "predict "potentially hazardous" from an asteroid's
 **orbit**". That turned out to be near-tautological: the hazard flag is *defined*
 by the orbit's closest approach, which the orbit geometry already determines. And
-the orbit carries almost no information about size — predicting albedo from orbital
+the orbit carries almost no information about size, predicting albedo from orbital
 elements beat the blind formula by ~4% (×1.44 → ×1.40), i.e. not at all.
 
 The fix was not a better model, it was **better data**. An asteroid's *spectrum*
@@ -50,7 +56,7 @@ from ×1.40 to ×1.13. The lesson: when a target is signal-thin, change the sign
 ## Pipeline
 
 Two external catalogues become two feature groups; the **join lives in the feature
-view**, on the asteroid number — the model never sees a pre-baked table.
+view**, on the asteroid number, the model never sees a pre-baked table.
 
 ```mermaid
 flowchart LR
@@ -88,23 +94,23 @@ flowchart LR
 | ![reflectance bands driving albedo](assets/band_importance.png) | ![diameter error benchmark](assets/diameter_error_benchmark.png) |
 
 The model leans on the red/near-infrared bands, where rocky S-types and dark
-C-types diverge most — the same colour difference a human eye would call "reddish
+C-types diverge most, the same colour difference a human eye would call "reddish
 rock" vs "charcoal". `autoresearch/` logs the full search; XGBoost on the raw
 spectrum won, and engineered spectral features (slopes, band depths) did not help,
 because the trees already recover them from the bands.
 
 ## Data
 
-- **Features** — Gaia DR3 mean reflectance spectra ([VizieR I/359/ssor](https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=I/359)),
+- **Features**: Gaia DR3 mean reflectance spectra ([VizieR I/359/ssor](https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=I/359)),
   16 bands 374–1034 nm, 34,577 numbered asteroids with a complete spectrum.
-- **Label** — NEOWISE thermal-model albedo + diameter (Masiero+ 2011,
+- **Label**: NEOWISE thermal-model albedo + diameter (Masiero+ 2011,
   [VizieR J/ApJ/741/68](https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=J/ApJ/741/68)),
   52,113 asteroids. Joined to the spectra on asteroid number → 21,046 training rows.
 
 ## Honesty rules
 
 - The model sees **only the Gaia reflectance**. Albedo, diameter and H are never
-  features — they are the label and the downstream physics.
+  features, they are the label and the downstream physics.
 - The app shows the **measured NASA albedo next to ours** whenever it exists, so
   you can judge the model on objects it was never trained to copy. Where NASA has
   no measurement (the 97%), ours is presented as an estimate, not a fact.
