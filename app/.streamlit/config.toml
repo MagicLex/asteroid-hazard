@@ -1,0 +1,12 @@
+[server]
+fileWatcherType = "none"
+headless = true
+runOnSave = false
+[browser]
+gatherUsageStats = false
+[theme]
+primaryColor = "#d97706"
+backgroundColor = "#0b0e11"
+secondaryBackgroundColor = "#1a1f2b"
+textColor = "#FAFAFA"
+font = "sans serif"

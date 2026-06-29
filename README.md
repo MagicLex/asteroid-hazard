@@ -45,7 +45,11 @@ every project here: if the model looks great, check what it is allowed to see.
 - [x] Collector (`collect/collect.py`): JPL SBDB -> `data/neos.jsonl`
 - [x] Feature pipeline -> offline feature group `neo_features` (Hopsworks job)
 - [x] Orbit-geometry-only feature view + PHA classifier, ROC-AUC 0.86 (Hopsworks job)
-- [ ] Serve / app (optional)
+- [x] Scorer app (`app/app.py`): type an asteroid -> live JPL orbit -> doomsday score
+- [ ] **Orbit-trajectory visual (next, gates deploy):** plot the asteroid's
+      orbital ellipse vs Earth's orbit from a/e/i/Ω/ω so you *see* the close
+      approach. Show the real MOID in the viz (honest) alongside the model's
+      geometry-only prediction. Deploy the app once it is visual.
 
 ## Reproduce
 

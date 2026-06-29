@@ -3,3 +3,4 @@ __pycache__/
 models/artifact/
 models/*_dl/
 .env
+artifact_dl/
