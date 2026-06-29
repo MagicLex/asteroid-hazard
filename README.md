@@ -7,123 +7,118 @@
 
 One small ML system per day on Hopsworks.
 
-Can you tell whether a near-Earth asteroid is classified "potentially hazardous"
-from the shape of its orbit alone?
+**97% of known asteroids have no measured size.** Size is what decides whether an
+impact is a city-killer or a footnote, and it follows from the albedo (how
+reflective the rock is) — but measuring albedo needs thermal-infrared from a space
+telescope, which we only have for ~3% of objects. For the rest, everyone falls
+back to a blind guess: *assume albedo ≈ 0.14 and convert brightness to size.*
 
-Catch: "potentially hazardous" (PHA) is *defined* as MOID ≤ 0.05 AU and absolute
-magnitude H ≤ 22 (close orbit and big enough). Feed the model MOID and H and the
-problem is a tautology. So the model never sees MOID, H, or the size proxies
-(diameter, albedo). It predicts PHA from orbit **geometry** only: semi-major
-axis, eccentricity, inclination, perihelion, aphelion, period, node, argument of
-perihelion, rotation. That captures the "does this orbit come close to Earth"
-half of the definition. It cannot see the size half. Honest and non-trivial.
-
-Data: the full near-Earth object catalogue from the
-[JPL Small-Body Database](https://ssd-api.jpl.nasa.gov/doc/sbdb_query.html)
-(free, no key, one request). 42,153 NEOs, 2,545 of them flagged PHA (6%).
-
-Built on [Hopsworks](https://www.hopsworks.ai/) as an FTI (feature, training,
-inference) system, forked from the
-[readme-vaporware-score](https://github.com/MagicLex/readme-vaporware-score)
-base patterns.
-
-![The orbit in 3D: Earth's orbit in blue, the asteroid's nominal orbit in orange, the translucent uncertainty cone, and the red dashed closest approach.](assets/orbit-3d.png)
-
-## Pipeline
-
-```mermaid
-flowchart LR
-    jpl([JPL SBDB · 42k NEOs]):::ext
-    subgraph FE[Feature]
-        direction TB
-        collect[collect.py] --> fp[feature_pipeline.py] --> fg[(neo_features)]:::hops
-    end
-    subgraph TR[Training]
-        direction TB
-        fv[neo_pha_fv · geometry only] --> train[train.py / autoresearch] --> reg[(asteroid_pha)]:::hops
-    end
-    subgraph INF[Inference]
-        direction TB
-        app[Streamlit app · 3D orbit + score]:::hops
-    end
-    jpl --> collect
-    fg --> fv
-    reg --> app
-    user([asteroid name]):::ext --> app
-    app -. live orbit .-> jpl
-    classDef hops fill:#10b98122,stroke:#34d399,color:#e5e7eb;
-    classDef ext fill:none,stroke:#6b7280,color:#9ca3af,stroke-dasharray:4 3;
-```
+This system does better. It reads the albedo off the asteroid's **Gaia DR3
+reflectance spectrum** (cheap, available for 60,000 asteroids) and turns it into a
+size, and a size into an impact scenario. For the objects nobody has measured,
+it's the only number going — and it's measurably sharper than the blind guess.
 
 ## Result
 
-From orbit geometry alone (no MOID, H, or size), 5-fold CV:
+Predict visible albedo from the 16-band Gaia spectrum, 5-fold CV on the 21,046
+asteroids that have both a Gaia spectrum and a NASA/NEOWISE albedo:
+
+![Size error: the spectrum halves the blind formula's error](assets/diameter_error_benchmark.png)
 
 | metric | value |
 |---|---:|
-| ROC-AUC | 0.86 |
-| average precision | 0.34 (6% baseline = 0.06) |
+| CV R² (log-albedo) | 0.60 |
+| albedo MAE | 0.15 dex |
+| **median diameter error: blind formula → this model** | **×1.34 → ×1.13** |
 
-The orbit shape predicts the "comes close to Earth" half of the PHA definition
-well; it cannot see the size half, which caps it below 1.0. Honest.
+Halving the size error matters: diameter `D = 1329·10^(−H/5)/√albedo`, so a tighter
+albedo is a tighter size, mass, and impact energy for every uncharacterized object.
 
-### The leakage we caught
+### Why this works (and the dead end it replaced)
 
-First run scored ROC-AUC 0.985, which was too good. Cause: Hopsworks lowercases
-feature names, so the stored column is `h`, but the exclusion list said `"H"`.
-Absolute magnitude H (the size half of the PHA definition) leaked straight in.
-Fixing the exclusion to lowercase dropped it to an honest 0.86. Same lesson as
-every project here: if the model looks great, check what it is allowed to see.
+This project started as "predict "potentially hazardous" from an asteroid's
+**orbit**". That turned out to be near-tautological: the hazard flag is *defined*
+by the orbit's closest approach, which the orbit geometry already determines. And
+the orbit carries almost no information about size — predicting albedo from orbital
+elements beat the blind formula by ~4% (×1.44 → ×1.40), i.e. not at all.
+
+The fix was not a better model, it was **better data**. An asteroid's *spectrum*
+encodes its composition (dark carbonaceous vs bright silicate), and composition
+sets albedo. Swapping the orbit catalogue for Gaia reflectance took the size error
+from ×1.40 to ×1.13. The lesson: when a target is signal-thin, change the signal.
+
+## Pipeline
+
+Two external catalogues become two feature groups; the **join lives in the feature
+view**, on the asteroid number — the model never sees a pre-baked table.
+
+```mermaid
+flowchart LR
+    gaia([Gaia DR3 · VizieR I/359/ssor]):::ext
+    wise([NEOWISE · VizieR J/ApJ/741/68]):::ext
+    subgraph FE[Feature]
+        direction TB
+        gp[gaia_reflectance.py] --> fgr[(asteroid_reflectance · 16 bands)]:::hops
+        np[neowise_albedo.py] --> fga[(asteroid_albedo · pV, D, H)]:::hops
+    end
+    subgraph TR[Training]
+        direction TB
+        fv[asteroid_albedo_fv · JOIN on number] --> train[train.py / autoresearch] --> reg[(asteroid_albedo)]:::hops
+    end
+    subgraph INF[Inference]
+        direction TB
+        app[Streamlit app · spectrum → albedo → size → impact]:::hops
+    end
+    gaia --> gp
+    wise --> np
+    fgr --> fv
+    fga --> fv
+    reg --> app
+    user([asteroid number / name]):::ext --> app
+    app -. live spectrum .-> gaia
+    classDef hops fill:#10b98122,stroke:#34d399,color:#e5e7eb;
+    classDef ext fill:none,stroke:#6b7280,color:#9ca3af,stroke-dasharray:4 3;
+```
 
 ## Model evaluation
 
 | | |
 |---|---|
-| ![ROC curve](assets/roc_curve.png) | ![Precision-recall](assets/pr_curve.png) |
-| ![Confusion matrix](assets/confusion_matrix.png) | ![Feature importance](assets/feature_importance.png) |
+| ![predicted vs measured albedo](assets/albedo_pred_vs_true.png) | ![residuals](assets/residuals.png) |
+| ![reflectance bands driving albedo](assets/band_importance.png) | ![diameter error benchmark](assets/diameter_error_benchmark.png) |
 
-Perihelion distance `q` and rotation period `rot_per` carry most of the signal.
-`q` is how close the orbit's nearest point sits to 1 AU, the "comes close to
-Earth" half of the definition. `rot_per` is a soft observability/size proxy (only
-larger, well-observed bodies have a measured spin), which is as near as the model
-gets to the size half it is forbidden to see.
+The model leans on the red/near-infrared bands, where rocky S-types and dark
+C-types diverge most — the same colour difference a human eye would call "reddish
+rock" vs "charcoal". `autoresearch/` logs the full search; XGBoost on the raw
+spectrum won, and engineered spectral features (slopes, band depths) did not help,
+because the trees already recover them from the bands.
 
-## What the model actually predicts
+## Data
 
-The 3D orbit, the MOID, the closest approach, the variation forecast: all of that
-is deterministic celestial mechanics computed from the orbital elements, not
-prediction. The one predicted number is the **doomsday score**, where
-`asteroid_pha` maps the orbital elements to a probability of being PHA.
+- **Features** — Gaia DR3 mean reflectance spectra ([VizieR I/359/ssor](https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=I/359)),
+  16 bands 374–1034 nm, 34,577 numbered asteroids with a complete spectrum.
+- **Label** — NEOWISE thermal-model albedo + diameter (Masiero+ 2011,
+  [VizieR J/ApJ/741/68](https://vizier.cds.unistra.fr/viz-bin/VizieR?-source=J/ApJ/741/68)),
+  52,113 asteroids. Joined to the spectra on asteroid number → 21,046 training rows.
 
-Because PHA is *defined* by MOID and size, and the model is barred from both, what
-it really does is re-derive the "close approach" half from geometry (the same
-quantity the orbit view computes exactly) and lean on `rot_per` as a weak size
-proxy. It cannot see the size half, so it cannot fully determine the label. That
-is the 0.86 ceiling, and why the task is honest rather than a tautology.
+## Honesty rules
 
-## Status
-
-- [x] Collector (`collect/collect.py`): JPL SBDB -> `data/neos.jsonl`
-- [x] Feature pipeline -> offline feature group `neo_features` (Hopsworks job)
-- [x] Orbit-geometry-only feature view + PHA classifier, ROC-AUC 0.86 (Hopsworks job)
-- [x] Scorer app (`app/app.py`): type an asteroid -> live JPL orbit -> doomsday score
-- [x] **Orbit-trajectory visual:** the asteroid's orbital ellipse vs Earth's,
-      from a/e/i/Ω/ω, drawn top-down and edge-on so you *see* the close approach.
-      The real JPL MOID is shown alongside the model's geometry-only prediction
-      (honest: MOID is never a model feature). Orbit math validated against JPL
-      MOID for Eros/Ceres (0.150 vs 0.149, 1.585 vs 1.58).
-- [x] **Deployed** as a Hopsworks Streamlit app (`app/deploy_app.py`), env
-      `asteroid-app-env` (python-app-pipeline + the model's pinned sklearn stack).
+- The model sees **only the Gaia reflectance**. Albedo, diameter and H are never
+  features — they are the label and the downstream physics.
+- The app shows the **measured NASA albedo next to ours** whenever it exists, so
+  you can judge the model on objects it was never trained to copy. Where NASA has
+  no measurement (the 97%), ours is presented as an estimate, not a fact.
+- The impact scenario (energy, crater) is hypothetical and physics-only; most of
+  these objects are main-belt and will never come near Earth.
 
 ## Reproduce
 
 ```bash
-python collect/collect.py     # pull the NEO catalogue (free, no key)
-# feature pipeline + train run as Hopsworks jobs (see pipelines/)
+# feature + training pipelines run as Hopsworks jobs (or from a terminal pod)
+python pipelines/gaia_reflectance.py   # Gaia spectra  -> FG asteroid_reflectance
+python pipelines/neowise_albedo.py     # NEOWISE albedo -> FG asteroid_albedo
+python pipelines/train.py              # FV join -> XGBoost -> model registry
 ```
 
-## Leakage rules (the honest part)
-
-Excluded from the model: `moid`, `H` (the literal PHA definition) and
-`diameter`, `albedo` (size proxies derived from H). Kept: orbital elements +
-rotation period + orbit class. The label is `pha`.
+The app (`app/app.py`) is a Hopsworks Streamlit deployment: type an asteroid, it
+fetches the live Gaia spectrum, predicts albedo, and renders the size and impact.
