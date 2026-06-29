@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 # ============================ EXPERIMENT (edit me) ============================
-EXP_DESC = "baseline HistGradientBoosting on raw 16 bands"
+EXP_DESC = "XGBoost on raw 16 bands (n700, depth5, lr0.03)"
 
 
 def engineer_features(X: pd.DataFrame) -> pd.DataFrame:
@@ -31,10 +31,10 @@ def engineer_features(X: pd.DataFrame) -> pd.DataFrame:
 
 def build_model():
     """Unfitted sklearn regressor with predict()."""
-    from sklearn.ensemble import HistGradientBoostingRegressor
-    return HistGradientBoostingRegressor(
-        max_iter=500, learning_rate=0.05, max_depth=5,
-        l2_regularization=1.0, random_state=42)
+    from xgboost import XGBRegressor
+    return XGBRegressor(n_estimators=700, max_depth=5, learning_rate=0.03,
+                        subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+                        random_state=42, n_jobs=-1)
 # ========================== end experiment section ===========================
 
 

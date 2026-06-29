@@ -203,20 +203,26 @@ def orbit_figure(row, sigmas, exp):
 
 @st.cache_data(ttl=86400)
 def neo_designations():
-    """All NEO designations from the JPL catalogue (the same source the model
-    was built on), so the random picker draws a real object, not a fixed list."""
+    """NEO designations from the JPL catalogue for the random picker. Capped so the
+    response stays small and fast (the full 42k-row pull times out), and biased to
+    NAMED objects (Apophis, Bennu, ...) which make for a friendlier random pick."""
     r = requests.get(SBDB_QUERY, params={"fields": "pdes,name", "sb-group": "neo",
-                                         "full-prec": "false"}, timeout=120)
+                                         "full-prec": "false", "limit": "8000"},
+                     timeout=30)
     r.raise_for_status()
     d = r.json()
     pi, ni = d["fields"].index("pdes"), d["fields"].index("name")
-    # prefer the friendly name (Apophis), fall back to the designation (2004 MN4)
-    return [row[ni] or row[pi] for row in d["data"] if row[ni] or row[pi]]
+    named = [row[ni] for row in d["data"] if row[ni]]
+    desigs = [row[pi] for row in d["data"] if row[pi]]
+    return named or desigs
 
 
 def pick_random():
-    st.session_state.asteroid = random.choice(neo_designations())
-    st.session_state.go = True
+    try:
+        st.session_state.asteroid = random.choice(neo_designations())
+        st.session_state.go = True
+    except Exception:
+        st.toast("JPL catalogue is slow right now — try again in a moment.")
 
 
 model = load_model()
