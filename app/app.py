@@ -143,8 +143,6 @@ def scale_label(mt):
 
 
 # ---------------------------------------------------------------- UI
-model, mver = load_model()
-
 st.markdown(
     """<div style="background:linear-gradient(90deg,#0b0e11,#1a1f2b);
        border-left:6px solid #f59e0b;padding:0.7rem 1rem;border-radius:6px;">
@@ -165,6 +163,8 @@ st.caption("Works for the 34,577 numbered asteroids with a Gaia DR3 spectrum. "
 
 if go or st.session_state.get("assessed"):
     st.session_state.assessed = True
+    with st.spinner("Connecting to Hopsworks and loading the model…"):
+        model, mver = load_model()
     query = st.session_state.ast.strip()
     spec = fetch_spectrum(query)
     if spec is None:
