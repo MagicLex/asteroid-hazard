@@ -1,4 +1,4 @@
-# Model optimization run — Gaia spectrum → albedo
+# Model optimization run: Gaia spectrum → albedo
 
 Autonomous model search over the joined feature view `asteroid_albedo_fv` (Gaia
 DR3 reflectance × NEOWISE albedo), in the
@@ -32,19 +32,16 @@ Two discards tell the real story:
 
 - **Spelling out the spectral physics did not help** (+0.0018, below margin).
   Slopes (S-types are red, C-types flat) and the 0.9 µm silicate band depth are
-  genuine taxonomic signal — but a gradient-boosted tree already reconstructs them
-  from the raw bands through its splits. Unlike #002, where the orbital-mechanics
-  feature (node distance) exposed a quantity the trees could not derive, here the
-  raw spectrum already carries everything.
+  genuine taxonomic signal, but a gradient-boosted tree already reconstructs them
+  from the raw bands through its splits; the raw spectrum already carries everything.
 - **More capacity overfit** (0.5948). The ceiling is ~0.60, set by albedo
   measurement noise (Gaia and NEOWISE both) and the intrinsic albedo spread within
   a taxonomic type, not by model power.
 
-So the entire lift came from bringing the right **data** — Gaia reflectance
-spectra joined to NEOWISE albedo in the feature view. The orbit catalogue (#002)
-could not predict albedo at all (×1.44 → ×1.40, ~4%); the spectrum does (×1.34 →
-×1.13). The lesson of this project: when a target is signal-thin, change the
-signal, not the model.
+So the entire lift came from the **data**: Gaia reflectance spectra joined to
+NEOWISE albedo in the feature view. Model choice and feature engineering moved the
+metric by hundredths; the spectrum itself is what reaches ×1.13 on diameter. When a
+target is signal-thin, change the signal, not the model.
 
 ## Files
 

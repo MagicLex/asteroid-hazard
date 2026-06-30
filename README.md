@@ -40,25 +40,13 @@ asteroids that have both a Gaia spectrum and a NASA/NEOWISE albedo:
 Halving the size error matters: diameter `D = 1329·10^(−H/5)/√albedo`, so a tighter
 albedo is a tighter size, mass, and impact energy for every uncharacterized object.
 
-### Why this works (and the dead end it replaced)
+### Why the spectrum works
 
-This project started as "predict "potentially hazardous" from an asteroid's
-**orbit**". That turned out to be near-tautological: the hazard flag is *defined*
-by the orbit's closest approach, which the orbit geometry already determines. And
-the orbit carries almost no information about size: on the asteroids that have both
-an orbit and a measured albedo, predicting albedo from orbital elements barely
-moved its blind baseline (×1.44 → ×1.40, ~4%).
-
-The fix was not a better model, it was **better data**. An asteroid's *spectrum*
-encodes its composition (dark carbonaceous vs bright silicate), and composition
-sets albedo. On the asteroids that have both a Gaia spectrum and a measured albedo,
-that same blind baseline is ×1.34 and the spectrum model reaches ×1.13. The lesson:
-when a target is signal-thin, change the signal.
-
-> The two blind-baseline numbers (×1.40 and ×1.34) are measured on different overlap
-> samples: orbit ∩ NEOWISE (~1.2k objects) and Gaia ∩ NEOWISE (~21k). Each result is
-> the blind formula vs the model *on the same sample*; the headline ×1.34 → ×1.13 is
-> the Gaia sample (the table above).
+An asteroid's reflectance spectrum encodes its composition: dark carbonaceous
+bodies are flat and grey, rocky silicate bodies are redder with a ~1 µm absorption
+band. Composition sets albedo, so the spectrum carries the size signal that
+brightness alone cannot. That is what the model reads off the 16 Gaia bands, and
+why it sharpens the diameter exactly where the constant-albedo assumption is blind.
 
 ## Pipeline
 
